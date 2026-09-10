@@ -909,6 +909,7 @@ class TestShippedExamples(unittest.TestCase):
     EXPECTED = {
         "example-significance-loss.json": Severity.SIGNIFICANCE,
         "example-direction-reversal.json": Severity.REVERSED,
+        "example-unverified.json": Severity.UNVERIFIED,
     }
 
     def test_every_example_demonstrates_its_claim(self):
@@ -1443,6 +1444,122 @@ class TestDoubleZeroStudies(unittest.TestCase):
         _, out, _ = run_cli("check", str(tmp), "--json")
         result = json.loads(out)["results"][0]
         self.assertIn("dz", result["original"]["excluded"])
+
+
+# --------------------------------------------------------------------------
+# Phase 0 / R3: simulated removal must never look like a real retraction
+# --------------------------------------------------------------------------
+
+class TestSimulatedRemoval(unittest.TestCase):
+    """A hypothetical removal of real, unretracted studies must say so.
+
+    A reader who sees real trials listed under "removed" will conclude those
+    trials were retracted. The banner exists so that conclusion is
+    impossible, and it cannot be turned off.
+    """
+
+    BANNER = "SIMULATED REMOVAL"
+
+    def _file(self, simulated: bool) -> str:
+        payload = {
+            "id": "sim", "measure": "RR", "model": "random",
+            "title": "Hypothetical removal, not a retraction",
+            "simulated_removal": simulated,
+            "studies": [
+                {"id": "Real A 2001", "yi": -0.6, "vi": 0.01, "retracted": True},
+                {"id": "Real B 2004", "yi": -0.2, "vi": 0.03},
+                {"id": "Real C 2009", "yi": -0.18, "vi": 0.035},
+                {"id": "Real D 2012", "yi": -0.12, "vi": 0.04},
+            ],
+        }
+        tmp = Path(tempfile.mkdtemp()) / "sim.json"
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        return str(tmp)
+
+    def test_flag_defaults_to_false(self):
+        self.assertFalse(bcg_meta().simulated_removal)
+
+    def test_flag_loads_from_json(self):
+        ma = load(self._file(True))[0]
+        self.assertTrue(ma.simulated_removal)
+
+    def test_banner_appears_in_text_output(self):
+        _, out, _ = run_cli("check", self._file(True), "--no-color")
+        self.assertIn(self.BANNER, out)
+        self.assertIn("NOT retracted", out)
+
+    def test_banner_appears_above_the_result(self):
+        _, out, _ = run_cli("check", self._file(True), "--no-color")
+        self.assertLess(out.index(self.BANNER), out.index("Impact"))
+
+    def test_banner_cannot_be_suppressed(self):
+        """No flag combination removes it."""
+        for flags in ([], ["--no-color"], ["--loo"], ["--no-color", "--loo"],
+                      ["--threshold", "99"]):
+            with self.subTest(flags=flags):
+                _, out, _ = run_cli("check", self._file(True), *flags)
+                self.assertIn(self.BANNER, out)
+
+    def test_banner_survives_a_failed_gate(self):
+        payload = json.loads(Path(self._file(True)).read_text(encoding="utf-8"))
+        payload["reported_estimate"] = 0.05
+        tmp = Path(tempfile.mkdtemp()) / "sim-unverified.json"
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        code, out, _ = run_cli("check", str(tmp), "--no-color")
+        self.assertEqual(code, 3)
+        self.assertIn(self.BANNER, out)
+
+    def test_json_carries_the_flag(self):
+        _, out, _ = run_cli("check", self._file(True), "--json")
+        result = json.loads(out)["results"][0]
+        self.assertTrue(result["simulated_removal"])
+        self.assertIn(self.BANNER, result["banner"])
+
+    def test_json_flag_is_false_without_it(self):
+        _, out, _ = run_cli("check", self._file(False), "--json")
+        result = json.loads(out)["results"][0]
+        self.assertFalse(result["simulated_removal"])
+        self.assertIsNone(result["banner"])
+
+    def test_no_banner_when_the_flag_is_absent(self):
+        _, out, _ = run_cli("check", self._file(False), "--no-color")
+        self.assertNotIn(self.BANNER, out)
+
+    def test_shipped_data_makes_no_simulated_claims(self):
+        """Nothing we ship pretends a real trial was retracted."""
+        for path in list(DATA_DIR.glob("*.json")) + list(EXAMPLES_DIR.glob("*.json")):
+            with self.subTest(dataset=path.name):
+                ma = load(path)[0]
+                if ma.simulated_removal:
+                    continue
+                # Any dataset marking real studies retracted must either be
+                # synthetic or carry the simulated flag.
+                if ma.retracted_studies:
+                    purpose = " ".join(str(v) for v in ma.metadata.values()).lower()
+                    self.assertIn("synthetic", purpose,
+                                  f"{path.name} marks studies retracted but is "
+                                  f"neither labelled synthetic nor flagged as a "
+                                  f"simulated removal")
+
+
+class TestShippedUnverifiedExample(unittest.TestCase):
+    """The gate needs a worked example too, or nobody believes it fires."""
+
+    def test_example_fails_its_gate(self):
+        ma = load(EXAMPLES_DIR / "example-unverified.json")[0]
+        self.assertIs(check_gate(ma).state, GateState.FAILED)
+
+    def test_example_yields_unverified_and_no_verdict(self):
+        impact = analyse(load(EXAMPLES_DIR / "example-unverified.json")[0])
+        self.assertIs(impact.severity, Severity.UNVERIFIED)
+        self.assertIsNone(impact.recalculated)
+
+    def test_example_exits_three(self):
+        code, out, _ = run_cli(
+            "check", str(EXAMPLES_DIR / "example-unverified.json"), "--no-color"
+        )
+        self.assertEqual(code, 3)
+        self.assertIn("GATE: FAILED", out)
 
 
 if __name__ == "__main__":
