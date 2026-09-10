@@ -13,17 +13,19 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 from remeta import (
+    GateState,
     MetaAnalysis,
     Severity,
     Study,
     analyse,
-    check_reproduction,
+    check_gate,
     fragility,
     load,
     pool,
@@ -31,7 +33,12 @@ from remeta import (
 )
 from remeta import __version__
 from remeta.cli import build_parser, main
-from remeta.impact import leave_one_out, reproduces_reported
+from remeta.impact import (
+    GATE_ABSOLUTE_COMBINED,
+    GATE_ABSOLUTE_PER_VALUE,
+    leave_one_out,
+    precision_tolerance,
+)
 from remeta.model import DataError, DoubleZeroError, from_dict
 from remeta.stats import effect_size, z_quantile
 
@@ -654,46 +661,184 @@ class TestImpact(unittest.TestCase):
         self.assertIs(impact.severity, Severity.REVERSED)
 
 
+class TestGateTolerance(unittest.TestCase):
+    """The two tolerance rules, tested on their own before use."""
+
+    def test_absolute_thresholds_are_the_documented_ones(self):
+        self.assertEqual(GATE_ABSOLUTE_PER_VALUE, 0.01)
+        self.assertEqual(GATE_ABSOLUTE_COMBINED, 0.03)
+
+    def test_precision_tolerance_is_half_a_unit_in_the_last_digit(self):
+        self.assertAlmostEqual(precision_tolerance(0.49), 0.005, places=12)
+        self.assertAlmostEqual(precision_tolerance(0.4896), 0.00005, places=12)
+        self.assertAlmostEqual(precision_tolerance(1.36), 0.005, places=12)
+        self.assertAlmostEqual(precision_tolerance(2.0), 0.05, places=12)
+
+    def test_precision_boundary_uses_an_epsilon(self):
+        """A difference of exactly half a unit must count as inside.
+
+        0.345 - 0.34 is 0.0050000000000000044 in binary floating point, so a
+        bare <= would reject a value that is exactly on the limit. This test
+        guards the epsilon; do not delete it when it looks redundant.
+        """
+        ma = MetaAnalysis(
+            id="edge", measure="RR", model="fixed",
+            reported_estimate=0.34,
+            studies=[Study(id="a", yi=math.log(0.345), vi=1e-12),
+                     Study(id="b", yi=math.log(0.345), vi=1e-12)],
+        )
+        gate = check_gate(ma)
+        self.assertIn("precision", gate.rules_passed)
+
+
 class TestReproductionGate(unittest.TestCase):
-    """If we cannot reproduce the published number, we must say so."""
+    """If ReMeta cannot reproduce what the review printed, there is no verdict."""
 
-    def test_matching_published_estimate_passes(self):
-        ma = bcg_meta(reported_estimate=0.4896)
-        ok, diff = reproduces_reported(ma)
-        self.assertTrue(ok)
-        assert diff is not None
-        self.assertLess(abs(diff), 1.0)
+    def test_unanchored_when_nothing_was_reported(self):
+        gate = check_gate(bcg_meta())
+        self.assertIs(gate.state, GateState.UNANCHORED)
+        self.assertFalse(gate.anchored)
+        self.assertFalse(gate.ok)
+        self.assertEqual(gate.comparisons, ())
 
-    def test_mismatched_published_estimate_fails(self):
-        ma = bcg_meta(reported_estimate=0.90)
-        ok, _ = reproduces_reported(ma)
-        self.assertFalse(ok)
+    def test_partial_when_only_the_estimate_was_reported(self):
+        gate = check_gate(bcg_meta(reported_estimate=0.4896))
+        self.assertIs(gate.state, GateState.PARTIAL)
+        self.assertTrue(gate.anchored)
+        self.assertTrue(gate.ok)
+        self.assertEqual([c.name for c in gate.comparisons], ["estimate"])
 
-    def test_absent_published_estimate_is_not_a_pass(self):
-        ok, diff = reproduces_reported(bcg_meta())
-        self.assertFalse(ok)
-        self.assertIsNone(diff)
-
-    def test_status_distinguishes_unchecked_from_mismatch(self):
-        self.assertEqual(check_reproduction(bcg_meta()).status, "unchecked")
-        self.assertFalse(check_reproduction(bcg_meta()).checked)
+    def test_reproduced_when_estimate_and_both_bounds_match(self):
+        gate = check_gate(bcg_meta(
+            reported_estimate=0.4896, reported_ci_low=0.3449, reported_ci_high=0.6950,
+        ))
+        self.assertIs(gate.state, GateState.REPRODUCED)
+        self.assertTrue(gate.ok)
         self.assertEqual(
-            check_reproduction(bcg_meta(reported_estimate=0.90)).status, "mismatch"
-        )
-        self.assertTrue(check_reproduction(bcg_meta(reported_estimate=0.90)).checked)
-        self.assertEqual(
-            check_reproduction(bcg_meta(reported_estimate=0.4896)).status, "match"
+            [c.name for c in gate.comparisons], ["estimate", "ci_low", "ci_high"]
         )
 
-    def test_tolerance_is_configurable(self):
-        ma = bcg_meta(reported_estimate=0.52)   # about 6% away
-        self.assertFalse(check_reproduction(ma, tolerance_pct=5.0).ok)
-        self.assertTrue(check_reproduction(ma, tolerance_pct=10.0).ok)
+    def test_failed_when_the_estimate_is_far_off(self):
+        gate = check_gate(bcg_meta(reported_estimate=0.90))
+        self.assertIs(gate.state, GateState.FAILED)
+        self.assertFalse(gate.ok)
+        self.assertTrue(gate.anchored)
+        self.assertEqual(gate.rules_passed, ())
 
-    def test_reproduction_reports_both_numbers(self):
-        rep = check_reproduction(bcg_meta(reported_estimate=0.4896))
-        self.assertAlmostEqual(rep.reported or 0.0, 0.4896, places=4)
-        self.assertAlmostEqual(rep.computed or 0.0, 0.4896, places=4)
+    def test_failed_when_only_the_interval_is_wrong(self):
+        """The old gate ignored the CI entirely; a huge interval passed."""
+        ma = MetaAnalysis(
+            id="m2", measure="RR", model="random",
+            reported_estimate=0.82, reported_ci_low=0.10, reported_ci_high=9.0,
+            studies=[Study(id="a", yi=-0.2, vi=0.03), Study(id="b", yi=-0.18, vi=0.035)],
+        )
+        computed = pool_meta(ma)
+        self.assertAlmostEqual(computed.ci_low, 0.64, places=2)
+        self.assertAlmostEqual(computed.ci_high, 1.06, places=2)
+        self.assertIs(check_gate(ma).state, GateState.FAILED)
+
+    def test_rounding_boundary_reproduces_under_both_rules(self):
+        """Published 0.49 [0.34, 0.70] against computed 0.4896 [0.3449, 0.6950]."""
+        ma = load(DATA_DIR / "bcg_colditz_1994.json")[0]
+        ma.reported_estimate = 0.49
+        ma.reported_ci_low = 0.34
+        ma.reported_ci_high = 0.70
+        gate = check_gate(ma)
+        self.assertIs(gate.state, GateState.REPRODUCED)
+        self.assertIn("absolute", gate.rules_passed)
+        self.assertIn("precision", gate.rules_passed)
+
+    def test_combined_rule_admits_three_small_misses(self):
+        """Each bound off by 0.012 fails per-value but passes combined."""
+        ma = load(DATA_DIR / "bcg_colditz_1994.json")[0]
+        computed = pool_meta(ma)
+        ma.reported_estimate = round(computed.estimate + 0.008, 6)
+        ma.reported_ci_low = round(computed.ci_low + 0.008, 6)
+        ma.reported_ci_high = round(computed.ci_high + 0.008, 6)
+        gate = check_gate(ma)
+        self.assertIs(gate.state, GateState.REPRODUCED)
+
+    def test_comparisons_carry_both_numbers_and_the_difference(self):
+        gate = check_gate(bcg_meta(reported_estimate=0.4896))
+        comparison = gate.comparisons[0]
+        self.assertAlmostEqual(comparison.reported, 0.4896, places=4)
+        self.assertAlmostEqual(comparison.computed, 0.4896, places=4)
+        self.assertAlmostEqual(
+            comparison.difference, comparison.computed - comparison.reported, places=12
+        )
+        self.assertTrue(comparison.within)
+
+    def test_one_reported_bound_only_is_partial(self):
+        gate = check_gate(bcg_meta(reported_estimate=0.4896, reported_ci_low=0.3449))
+        self.assertIs(gate.state, GateState.PARTIAL)
+        self.assertEqual([c.name for c in gate.comparisons], ["estimate", "ci_low"])
+
+    def test_shipped_reference_dataset_is_reproduced(self):
+        ma = load(DATA_DIR / "bcg_colditz_1994.json")[0]
+        self.assertIs(check_gate(ma).state, GateState.REPRODUCED)
+
+
+class TestGateGovernsTheVerdict(unittest.TestCase):
+    """The gate is consulted first, and a failure suppresses the verdict."""
+
+    def _off_by_145_percent(self) -> MetaAnalysis:
+        return MetaAnalysis(
+            id="m", measure="RR", model="random", reported_estimate=0.30,
+            studies=[Study(id="f", yi=-0.6, vi=0.01, retracted=True),
+                     Study(id="a", yi=-0.2, vi=0.03),
+                     Study(id="b", yi=-0.18, vi=0.035),
+                     Study(id="c", yi=-0.12, vi=0.04)],
+        )
+
+    def test_failed_gate_yields_unverified_and_no_verdict(self):
+        impact = analyse(self._off_by_145_percent())
+        self.assertIs(impact.severity, Severity.UNVERIFIED)
+        self.assertIsNone(impact.recalculated)
+        self.assertIsNone(impact.evolution_pct)
+        self.assertIs(impact.gate.state, GateState.FAILED)
+
+    def test_unverified_is_not_actionable_even_though_it_is_serious(self):
+        """Counter-intuitive on purpose: someone will try to "fix" this.
+
+        UNVERIFIED means ReMeta has no finding to act on. Marking it
+        actionable would put an unverified analysis into the same queue as a
+        real, gated verdict, which is precisely what the gate exists to stop.
+        """
+        self.assertFalse(Severity.UNVERIFIED.actionable)
+        self.assertFalse(analyse(self._off_by_145_percent()).severity.actionable)
+
+    def test_unverified_ranks_above_minimal(self):
+        self.assertGreater(Severity.UNVERIFIED.rank, Severity.MINIMAL.rank)
+        self.assertGreater(Severity.UNVERIFIED.rank, Severity.SUBSTANTIAL.rank)
+
+    def test_unverified_carries_no_false_reassurance(self):
+        impact = analyse(self._off_by_145_percent())
+        self.assertFalse(impact.lost_significance)
+        self.assertFalse(impact.gained_significance)
+        self.assertFalse(impact.direction_reversed)
+        self.assertIsNone(impact.within_original_ci)
+
+    def test_failed_gate_still_reports_what_we_computed(self):
+        """The point of the failure message is to help fix the input."""
+        impact = analyse(self._off_by_145_percent())
+        self.assertIsNotNone(impact.original)
+        self.assertTrue(any("reproduce" in note for note in impact.notes))
+
+    def test_partial_gate_allows_a_verdict(self):
+        ma = load(EXAMPLES_DIR / "example-significance-loss.json")[0]
+        impact = analyse(ma)
+        self.assertIs(impact.gate.state, GateState.PARTIAL)
+        self.assertIs(impact.severity, Severity.SIGNIFICANCE)
+
+    def test_unanchored_gate_allows_a_verdict(self):
+        ma = load(EXAMPLES_DIR / "example-direction-reversal.json")[0]
+        impact = analyse(ma)
+        self.assertIs(impact.gate.state, GateState.UNANCHORED)
+        self.assertIs(impact.severity, Severity.REVERSED)
+
+    def test_every_impact_carries_a_gate(self):
+        for ma in (bcg_meta(), self._off_by_145_percent()):
+            self.assertIsInstance(analyse(ma).gate.state, GateState)
 
 
 class TestFragility(unittest.TestCase):
@@ -735,8 +880,9 @@ class TestFragility(unittest.TestCase):
 class TestShippedReferenceDataset(unittest.TestCase):
     def test_shipped_reference_dataset_reproduces(self):
         ma = load(DATA_DIR / "bcg_colditz_1994.json")[0]
-        rep = check_reproduction(ma)
-        self.assertTrue(rep.ok, f"reference dataset drifted by {rep.difference_pct}%")
+        gate = check_gate(ma)
+        self.assertIs(gate.state, GateState.REPRODUCED,
+                      f"reference dataset drifted: {gate.comparisons}")
 
     def test_reference_dataset_has_no_retractions(self):
         """It validates the maths, not the retraction logic."""
@@ -799,14 +945,13 @@ class TestShippedExamples(unittest.TestCase):
         for path in EXAMPLES_DIR.glob("*.json"):
             self.assertTrue(load(path), f"{path.name} failed to load")
 
-    def test_significance_example_reproduces_its_declared_estimate(self):
+    def test_significance_example_passes_its_gate(self):
         ma = load(EXAMPLES_DIR / "example-significance-loss.json")[0]
-        rep = check_reproduction(ma)
-        self.assertEqual(rep.status, "match")
+        self.assertIs(check_gate(ma).state, GateState.PARTIAL)
 
     def test_reversal_example_declares_no_published_estimate(self):
         ma = load(EXAMPLES_DIR / "example-direction-reversal.json")[0]
-        self.assertEqual(check_reproduction(ma).status, "unchecked")
+        self.assertIs(check_gate(ma).state, GateState.UNANCHORED)
 
     def test_every_example_marks_at_least_one_retraction(self):
         for path in EXAMPLES_DIR.glob("*.json"):
@@ -878,19 +1023,77 @@ class TestCli(unittest.TestCase):
         self.assertIn("NO RETRACTIONS", out)
         self.assertIn("0 need human review", out)
 
-    def test_reproduction_status_is_printed(self):
+    def test_gate_line_comes_before_any_other_output(self):
         _, out, _ = run_cli("check", self.BCG, "--no-color")
-        self.assertIn("Reproduction", out)
-        self.assertIn("matches the published", out)
+        body = out.strip().splitlines()
+        gate_line = next(i for i, line in enumerate(body) if line.startswith("GATE:"))
+        analysis_line = next(i for i, line in enumerate(body) if line.startswith("Analysis:"))
+        self.assertLess(gate_line, analysis_line)
+        self.assertIn("REPRODUCED", body[gate_line])
 
-    def test_unreproduced_analysis_is_flagged(self):
-        tmp = Path(tempfile.mkdtemp()) / "wrong.json"
+    def _wrong_reported(self, estimate: float) -> str:
         payload = json.loads(Path(self.BCG).read_text(encoding="utf-8"))
-        payload["reported_estimate"] = 0.95
+        payload["reported_estimate"] = estimate
+        payload.pop("reported_ci_low", None)
+        payload.pop("reported_ci_high", None)
+        tmp = Path(tempfile.mkdtemp()) / "wrong.json"
         tmp.write_text(json.dumps(payload), encoding="utf-8")
-        _, out, _ = run_cli("check", str(tmp), "--no-color")
-        self.assertIn("FAILED", out)
-        self.assertIn("unverified", out)
+        return str(tmp)
+
+    def test_failed_gate_exits_three(self):
+        code, out, err = run_cli("check", self._wrong_reported(0.95), "--no-color")
+        self.assertEqual(code, 3)
+        self.assertEqual(err, "")
+        self.assertIn("GATE: FAILED", out)
+        self.assertIn("UNVERIFIED", out)
+
+    def test_failed_gate_emits_no_verdict(self):
+        _, out, _ = run_cli("check", self._wrong_reported(0.95), "--no-color")
+        self.assertNotIn("After removing retracted studies", out)
+        for label in ("SIGNIFICANCE CHANGED", "DIRECTION REVERSED",
+                      "SUBSTANTIAL SHIFT", "MINIMAL SHIFT"):
+            self.assertNotIn(label, out)
+
+    def test_failed_gate_shows_both_numbers(self):
+        _, out, _ = run_cli("check", self._wrong_reported(0.95), "--no-color")
+        self.assertIn("published", out)
+        self.assertIn("computed", out)
+
+    def test_gate_exit_three_outranks_an_actionable_verdict(self):
+        code, _, _ = run_cli("check", self._wrong_reported(0.95), self.SIG_LOSS,
+                             "--no-color")
+        self.assertEqual(code, 3)
+
+    def test_json_carries_a_gate_object_on_every_result(self):
+        _, out, _ = run_cli("check", self.SIG_LOSS, self.REVERSAL, self.BCG, "--json")
+        results = json.loads(out)["results"]
+        self.assertEqual(len(results), 3)
+        for result in results:
+            gate = result["gate"]
+            self.assertIn(gate["state"],
+                          {"reproduced", "partial", "failed", "unanchored"})
+            self.assertIn("rule", gate)
+            self.assertIn("rules_passed", gate)
+            self.assertIn("comparisons", gate)
+
+    def test_json_failed_gate_is_not_actionable(self):
+        """The old JSON carried actionable=true on a 145%-off analysis."""
+        code, out, _ = run_cli("check", self._wrong_reported(0.95), "--json")
+        self.assertEqual(code, 3)
+        result = json.loads(out)["results"][0]
+        self.assertEqual(result["gate"]["state"], "failed")
+        self.assertEqual(result["severity"], "unverified")
+        self.assertFalse(result["actionable"])
+        self.assertIsNone(result["recalculated"])
+
+    def test_json_gate_comparisons_name_each_value(self):
+        _, out, _ = run_cli("check", self.BCG, "--json")
+        gate = json.loads(out)["results"][0]["gate"]
+        self.assertEqual([c["name"] for c in gate["comparisons"]],
+                         ["estimate", "ci_low", "ci_high"])
+        for comparison in gate["comparisons"]:
+            for key in ("reported", "computed", "difference", "tolerance", "within"):
+                self.assertIn(key, comparison)
 
     def test_no_color_output_has_no_escape_codes(self):
         _, out, _ = run_cli("check", self.SIG_LOSS, "--no-color")
@@ -909,22 +1112,22 @@ class TestCli(unittest.TestCase):
         self.assertTrue(result["actionable"])
         self.assertTrue(result["lost_significance"])
         self.assertEqual(result["removed"], ["Fabricated 2015"])
-        self.assertEqual(result["reproduction"]["status"], "match")
+        self.assertEqual(result["gate"]["state"], "partial")
         self.assertLess(result["original"]["p_value"], 0.05)
         self.assertGreater(result["recalculated"]["p_value"], 0.05)
 
-    def test_json_output_marks_an_unchecked_reproduction(self):
+    def test_json_output_marks_an_unanchored_gate(self):
         _, out, _ = run_cli("check", self.REVERSAL, "--json")
-        result = json.loads(out)["results"][0]
-        self.assertEqual(result["reproduction"]["status"], "unchecked")
-        self.assertIsNone(result["reproduction"]["reported"])
+        gate = json.loads(out)["results"][0]["gate"]
+        self.assertEqual(gate["state"], "unanchored")
+        self.assertEqual(gate["comparisons"], [])
 
     def test_json_output_for_the_reference_dataset(self):
         code, out, _ = run_cli("check", self.BCG, "--json")
         self.assertEqual(code, 0)
         result = json.loads(out)["results"][0]
         self.assertEqual(result["severity"], "no_retractions")
-        self.assertEqual(result["reproduction"]["status"], "match")
+        self.assertEqual(result["gate"]["state"], "partial")
         self.assertIsNone(result["recalculated"])
         self.assertAlmostEqual(result["original"]["estimate"], 0.4896, places=4)
 
@@ -946,18 +1149,28 @@ class TestCli(unittest.TestCase):
         self.assertIn("MINIMAL SHIFT", lenient)
         self.assertIn("SUBSTANTIAL SHIFT", strict)
 
-    def test_several_files_are_ranked_most_severe_first(self):
+    def test_several_files_are_all_reported(self):
         code, out, _ = run_cli("check", self.SIG_LOSS, self.REVERSAL, self.BCG,
                                "--no-color")
         self.assertEqual(code, 1)
         self.assertIn("3 analyses checked", out)
         self.assertIn("2 need human review", out)
-        order = [
-            out.index("DIRECTION REVERSED"),
-            out.index("SIGNIFICANCE CHANGED"),
-            out.index("NO RETRACTIONS"),
-        ]
+
+    def test_anchored_results_are_ranked_most_severe_first(self):
+        code, out, _ = run_cli("check", self.SIG_LOSS, self.BCG, "--no-color")
+        self.assertEqual(code, 1)
+        order = [out.index("SIGNIFICANCE CHANGED"), out.index("NO RETRACTIONS")]
         self.assertEqual(order, sorted(order))
+
+    def test_unanchored_results_sort_below_every_anchored_one(self):
+        """An unanchored verdict has nothing holding it to the published paper.
+
+        The reversal example declares no published estimate, so despite being
+        the most severe class it must rank below the reproduced reference
+        dataset, which has nothing wrong with it at all.
+        """
+        _, out, _ = run_cli("check", self.REVERSAL, self.BCG, "--no-color")
+        self.assertLess(out.index("NO RETRACTIONS"), out.index("DIRECTION REVERSED"))
 
     def test_duplicate_ids_across_files_are_rejected(self):
         code, _, err = run_cli("check", self.BCG, self.BCG)
