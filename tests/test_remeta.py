@@ -1127,7 +1127,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(code, 0)
         result = json.loads(out)["results"][0]
         self.assertEqual(result["severity"], "no_retractions")
-        self.assertEqual(result["gate"]["state"], "partial")
+        self.assertEqual(result["gate"]["state"], "reproduced")
         self.assertIsNone(result["recalculated"])
         self.assertAlmostEqual(result["original"]["estimate"], 0.4896, places=4)
 

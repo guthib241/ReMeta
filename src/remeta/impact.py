@@ -24,6 +24,7 @@ output comparable to their published recalculation.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -33,10 +34,21 @@ from .stats import PooledResult, pool
 #: Default percentage change in the point estimate counted as substantial.
 SUBSTANTIAL_THRESHOLD = 10.0
 
-#: Default tolerance, in percent, for accepting a reproduction of a published
-#: estimate. Published forest plots are usually rounded to two or three
-#: significant figures, so an exact match is not expected.
-REPRODUCTION_TOLERANCE = 5.0
+#: Absolute tolerance, on the reporting scale, allowed on any single compared
+#: value under the "absolute" gate rule.
+GATE_ABSOLUTE_PER_VALUE = 0.01
+
+#: Absolute tolerance allowed across the estimate and both interval bounds
+#: taken together, as an alternative to the per-value limit.
+GATE_ABSOLUTE_COMBINED = 0.03
+
+#: Floating-point slack so a difference of exactly one tolerance counts as
+#: inside it. 0.345 - 0.34 is 0.0050000000000000044 in binary, so a bare <=
+#: would reject a value sitting exactly on the limit.
+GATE_EPSILON = 1e-9
+
+#: Names of the tolerance rules, in the order they are tried.
+GATE_RULES = ("absolute", "precision")
 
 
 class Severity(str, Enum):
@@ -44,6 +56,7 @@ class Severity(str, Enum):
 
     REVERSED = "reversed"
     SIGNIFICANCE = "significance_change"
+    UNVERIFIED = "unverified"
     SUBSTANTIAL = "substantial_change"
     MINIMAL = "minimal_change"
     UNPOOLABLE = "unpoolable"
@@ -53,9 +66,10 @@ class Severity(str, Enum):
     def rank(self) -> int:
         """Sort order: higher means more urgent."""
         return {
-            Severity.UNPOOLABLE: 5,
-            Severity.REVERSED: 4,
-            Severity.SIGNIFICANCE: 3,
+            Severity.UNPOOLABLE: 6,
+            Severity.REVERSED: 5,
+            Severity.SIGNIFICANCE: 4,
+            Severity.UNVERIFIED: 3,
             Severity.SUBSTANTIAL: 2,
             Severity.MINIMAL: 1,
             Severity.NO_RETRACTIONS: 0,
@@ -63,33 +77,174 @@ class Severity(str, Enum):
 
     @property
     def actionable(self) -> bool:
-        """Whether a human needs to look at this review."""
-        return self.rank >= 3
+        """Whether this is a finding a human should act on.
+
+        Deliberately a membership test rather than a rank threshold, because
+        UNVERIFIED ranks high and is NOT actionable: ReMeta has no finding to
+        act on there, only an input it could not verify. Putting it in the
+        same queue as a gated verdict is exactly what the gate exists to
+        prevent, so do not "fix" this into `rank >= n`.
+        """
+        return self in _ACTIONABLE
 
 
-@dataclass
-class Reproduction:
-    """Whether ReMeta could reproduce the estimate the review printed.
+#: The severity classes that represent a finding a human should act on.
+#: UNVERIFIED is deliberately absent: see Severity.actionable.
+_ACTIONABLE = frozenset({
+    Severity.REVERSED,
+    Severity.SIGNIFICANCE,
+    Severity.UNPOOLABLE,
+})
 
-    `status` is one of:
-      "match"      recomputed estimate agrees with the published one
-      "mismatch"   it does not; the comparison below is unverified
-      "unchecked"  the input declared no published estimate to check against
+
+class GateState(str, Enum):
+    """Whether ReMeta could reproduce the result the review printed.
+
+    REPRODUCED  the estimate and both interval bounds are within tolerance
+    PARTIAL     everything reported is within tolerance, but the interval
+                was not fully reported, so the check is weaker
+    FAILED      something reported falls outside tolerance
+    UNANCHORED  the input declared nothing to compare against
     """
 
-    status: str
-    computed: float | None = None
-    reported: float | None = None
-    difference_pct: float | None = None
-    tolerance_pct: float = REPRODUCTION_TOLERANCE
+    REPRODUCED = "reproduced"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    UNANCHORED = "unanchored"
+
+
+@dataclass(frozen=True)
+class GateComparison:
+    """One published number against the one ReMeta computed."""
+
+    name: str            # "estimate", "ci_low" or "ci_high"
+    reported: float
+    computed: float
+    difference: float    # computed - reported, on the reporting scale
+    tolerance: float     # the limit that was applied to this value
+    within: bool
+
+
+@dataclass(frozen=True)
+class Gate:
+    """The result of the reproduction gate for one meta-analysis."""
+
+    state: GateState
+    rule: str | None = None                     # the rule that granted a pass
+    rules_passed: tuple[str, ...] = ()
+    comparisons: tuple[GateComparison, ...] = ()
 
     @property
     def ok(self) -> bool:
-        return self.status == "match"
+        """Whether a recomputed verdict may be reported at all."""
+        return self.state in (GateState.REPRODUCED, GateState.PARTIAL)
 
     @property
-    def checked(self) -> bool:
-        return self.status != "unchecked"
+    def anchored(self) -> bool:
+        """Whether there was anything published to check against."""
+        return self.state is not GateState.UNANCHORED
+
+    def describe(self) -> str:
+        """One line a researcher can act on."""
+        if self.state is GateState.UNANCHORED:
+            return "nothing published to check against; this verdict is unanchored"
+        if self.state is GateState.FAILED:
+            return "cannot reproduce the published result; no verdict is issued"
+        published = next(
+            (c.reported for c in self.comparisons if c.name == "estimate"), None
+        )
+        anchor = f" {published:g}" if published is not None else ""
+        if self.state is GateState.PARTIAL:
+            return (
+                f"reproduces the published estimate{anchor} "
+                f"({self.rule} rule); no published interval to check"
+            )
+        return f"reproduces the published estimate{anchor} and interval ({self.rule} rule)"
+
+
+def precision_tolerance(reported: float) -> float:
+    """Half a unit in the last digit of `reported`, as it was written.
+
+    0.49 gives 0.005; 0.4896 gives 0.00005. Trailing zeros cannot survive
+    JSON parsing, so a value printed as "0.70" arrives as 0.7 and gets the
+    looser 0.05. That makes this rule generous rather than wrong, and the
+    absolute rule is applied alongside it.
+    """
+    text = repr(float(reported))
+    if "e" in text or "E" in text:
+        # A magnitude far from 1; fall back to a relative half-unit.
+        exponent = math.floor(math.log10(abs(reported))) if reported else 0
+        return 0.5 * 10.0 ** (exponent - 3)
+    decimals = len(text.partition(".")[2].rstrip("0")) or 1
+    return 0.5 * 10.0 ** (-decimals)
+
+
+def _pairs_to_check(ma: MetaAnalysis, computed: PooledResult) -> list[tuple[str, float, float]]:
+    candidates = (
+        ("estimate", ma.reported_estimate, computed.estimate),
+        ("ci_low", ma.reported_ci_low, computed.ci_low),
+        ("ci_high", ma.reported_ci_high, computed.ci_high),
+    )
+    return [(name, r, c) for name, r, c in candidates if r is not None]
+
+
+def check_gate(ma: MetaAnalysis, computed: PooledResult | None = None) -> Gate:
+    """Compare our pooling against the numbers the review actually printed.
+
+    This gates everything else. If ReMeta cannot reproduce the published
+    result, its recalculation of that result means nothing, and the analysis
+    must be reported as unverified rather than as a finding.
+
+    Two rules are tried. The "absolute" rule allows 0.01 on each compared
+    value, or 0.03 across all of them; the "precision" rule allows half a
+    unit in the last digit each value was printed to. A pass under either is
+    a pass, and the rule that granted it is recorded.
+    """
+    if ma.reported_estimate is None:
+        return Gate(state=GateState.UNANCHORED)
+
+    if computed is None:
+        computed = pool(ma.studies, ma.measure, ma.model)
+    pairs = _pairs_to_check(ma, computed)
+    diffs = [abs(c - r) for _, r, c in pairs]
+
+    absolute_ok = (
+        all(d <= GATE_ABSOLUTE_PER_VALUE + GATE_EPSILON for d in diffs)
+        or sum(diffs) <= GATE_ABSOLUTE_COMBINED + GATE_EPSILON
+    )
+    precision_ok = all(
+        abs(c - r) <= precision_tolerance(r) + GATE_EPSILON for _, r, c in pairs
+    )
+    rules_passed = tuple(
+        name for name, ok in (("absolute", absolute_ok), ("precision", precision_ok)) if ok
+    )
+    rule = rules_passed[0] if rules_passed else None
+
+    # Report each value against the tolerance that actually decided it.
+    applied = (
+        (lambda r: GATE_ABSOLUTE_PER_VALUE)
+        if rule != "precision"
+        else precision_tolerance
+    )
+    comparisons = tuple(
+        GateComparison(
+            name=name,
+            reported=r,
+            computed=c,
+            difference=c - r,
+            tolerance=applied(r),
+            within=abs(c - r) <= applied(r) + GATE_EPSILON,
+        )
+        for name, r, c in pairs
+    )
+
+    if not rules_passed:
+        state = GateState.FAILED
+    elif ma.reported_ci_low is not None and ma.reported_ci_high is not None:
+        state = GateState.REPRODUCED
+    else:
+        state = GateState.PARTIAL
+    return Gate(state=state, rule=rule, rules_passed=rules_passed, comparisons=comparisons)
 
 
 @dataclass
@@ -109,9 +264,12 @@ class Impact:
     within_original_ci: bool | None = None
     retracted_weight_pct: float = 0.0
     notes: list[str] = field(default_factory=list)
+    gate: Gate = field(default_factory=lambda: Gate(state=GateState.UNANCHORED))
 
     def summary(self) -> str:
         """One-line description of the change, for logs and commit messages."""
+        if self.severity is Severity.UNVERIFIED:
+            return "unverified: the published result could not be reproduced"
         if self.severity is Severity.NO_RETRACTIONS:
             return "no retracted studies in this analysis"
         if self.severity is Severity.UNPOOLABLE:
@@ -124,6 +282,17 @@ class Impact:
             f"{self.original.estimate:.3f} -> {self.recalculated.estimate:.3f}{change}, "
             f"p {self.original.p_value:.3g} -> {self.recalculated.p_value:.3g}"
         )
+
+
+def _gate_diff_note(gate: Gate) -> str:
+    """Spell out which published numbers we could not match."""
+    parts = [
+        f"{c.name} published {c.reported:g} against computed {c.computed:g} "
+        f"({c.difference:+.4g})"
+        for c in gate.comparisons
+        if not c.within
+    ]
+    return "gate detail: " + ("; ".join(parts) if parts else "no value matched")
 
 
 def _exclusion_notes(*results: PooledResult | None) -> list[str]:
@@ -148,11 +317,37 @@ def analyse(
     ma: MetaAnalysis,
     substantial_threshold: float = SUBSTANTIAL_THRESHOLD,
 ) -> Impact:
-    """Recompute `ma` without its retracted studies and classify the change."""
+    """Recompute `ma` without its retracted studies and classify the change.
+
+    The reproduction gate runs first. If it fails, no recomputed verdict is
+    produced at all: the severity is UNVERIFIED, `recalculated` stays None,
+    and every change flag stays false. A comparison you cannot anchor to the
+    published result is a different analysis wearing the same name.
+    """
     removed = [s.id for s in ma.retracted_studies]
     survivors = ma.surviving_studies
 
     original = pool(ma.studies, ma.measure, ma.model)
+    gate = check_gate(ma, original)
+
+    if not gate.ok and gate.anchored:
+        return Impact(
+            meta_analysis_id=ma.id,
+            severity=Severity.UNVERIFIED,
+            original=original,
+            recalculated=None,
+            removed=removed,
+            retracted_weight_pct=sum(
+                original.weights.get(sid, 0.0) for sid in removed
+            ),
+            gate=gate,
+            notes=_exclusion_notes(original) + [
+                "ReMeta could not reproduce the result this analysis reports "
+                "as published, so removing the retracted studies would say "
+                "nothing reliable about it",
+                _gate_diff_note(gate),
+            ],
+        )
 
     if not removed:
         # Still report the reproduced pooled estimate: it is the answer to
@@ -163,6 +358,7 @@ def analyse(
             severity=Severity.NO_RETRACTIONS,
             original=original,
             recalculated=None,
+            gate=gate,
             notes=_exclusion_notes(original),
         )
 
@@ -176,6 +372,7 @@ def analyse(
             recalculated=None,
             removed=removed,
             retracted_weight_pct=retracted_weight,
+            gate=gate,
             notes=_exclusion_notes(original) + [
                 f"only {len(survivors)} study(ies) remain; the pooled result "
                 "cannot be reproduced without the retracted work"
@@ -233,6 +430,7 @@ def analyse(
         direction_reversed=reversed_dir,
         within_original_ci=within_ci,
         retracted_weight_pct=retracted_weight,
+        gate=gate,
         notes=notes,
     )
 
@@ -273,39 +471,3 @@ def fragility(ma: MetaAnalysis) -> tuple[str | None, float]:
         if abs(shift) > abs(worst_shift):
             worst_id, worst_shift = sid, shift
     return worst_id, worst_shift
-
-
-def check_reproduction(
-    ma: MetaAnalysis, tolerance_pct: float = REPRODUCTION_TOLERANCE
-) -> Reproduction:
-    """Compare our pooling against the estimate the review actually printed.
-
-    This gates everything else. If we cannot reproduce the published number
-    from the published forest plot, our recalculation of it means nothing,
-    and the analysis must be reported as unverified rather than as a finding.
-    """
-    if ma.reported_estimate is None:
-        return Reproduction(status="unchecked", tolerance_pct=tolerance_pct)
-    computed = pool(ma.studies, ma.measure, ma.model).estimate
-    diff = _percent_change(computed, ma.reported_estimate)
-    status = "match" if diff is not None and abs(diff) <= tolerance_pct else "mismatch"
-    return Reproduction(
-        status=status,
-        computed=computed,
-        reported=ma.reported_estimate,
-        difference_pct=diff,
-        tolerance_pct=tolerance_pct,
-    )
-
-
-def reproduces_reported(
-    ma: MetaAnalysis, tolerance_pct: float = REPRODUCTION_TOLERANCE
-) -> tuple[bool, float | None]:
-    """Boolean form of :func:`check_reproduction`.
-
-    Returns (reproduced, percent difference). A missing published estimate is
-    not a pass: it returns (False, None). Use :func:`check_reproduction` when
-    you need to tell "could not reproduce" apart from "nothing to check".
-    """
-    result = check_reproduction(ma, tolerance_pct)
-    return result.ok, result.difference_pct

@@ -15,16 +15,20 @@ Typical use::
 """
 
 from .impact import (
-    REPRODUCTION_TOLERANCE,
+    GATE_ABSOLUTE_COMBINED,
+    GATE_ABSOLUTE_PER_VALUE,
+    GATE_RULES,
     SUBSTANTIAL_THRESHOLD,
+    Gate,
+    GateComparison,
+    GateState,
     Impact,
-    Reproduction,
     Severity,
     analyse,
-    check_reproduction,
+    check_gate,
     fragility,
     leave_one_out,
-    reproduces_reported,
+    precision_tolerance,
 )
 from .model import (
     COUNT_MEASURES,
@@ -48,15 +52,19 @@ __all__ = [
     "__version__",
     # analysis
     "analyse",
-    "check_reproduction",
+    "check_gate",
     "fragility",
     "leave_one_out",
-    "reproduces_reported",
+    "precision_tolerance",
     "Impact",
-    "Reproduction",
+    "Gate",
+    "GateComparison",
+    "GateState",
     "Severity",
     "SUBSTANTIAL_THRESHOLD",
-    "REPRODUCTION_TOLERANCE",
+    "GATE_ABSOLUTE_PER_VALUE",
+    "GATE_ABSOLUTE_COMBINED",
+    "GATE_RULES",
     # data model
     "DataError",
     "DoubleZeroError",

@@ -9,6 +9,7 @@ Exit codes:
     0  nothing actionable
     1  at least one analysis needs human reassessment
     2  usage or data error
+    3  at least one analysis failed the reproduction gate
 """
 
 from __future__ import annotations
@@ -17,15 +18,16 @@ import argparse
 import json
 import os
 import sys
+import textwrap
 
 from . import __version__
 from .impact import (
     SUBSTANTIAL_THRESHOLD,
+    Gate,
+    GateState,
     Impact,
-    Reproduction,
     Severity,
     analyse,
-    check_reproduction,
     fragility,
     leave_one_out,
 )
@@ -43,6 +45,14 @@ COLOR = {
     Severity.SUBSTANTIAL: "\033[1;33m",
     Severity.MINIMAL: "\033[0;36m",
     Severity.NO_RETRACTIONS: "\033[0;32m",
+    Severity.UNVERIFIED: "\033[1;35m",
+}
+
+GATE_COLOR = {
+    GateState.REPRODUCED: "\033[0;32m",
+    GateState.PARTIAL: "\033[0;36m",
+    GateState.FAILED: "\033[1;35m",
+    GateState.UNANCHORED: "\033[0;33m",
 }
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -55,6 +65,7 @@ LABEL = {
     Severity.SUBSTANTIAL: "SUBSTANTIAL SHIFT",
     Severity.MINIMAL: "MINIMAL SHIFT",
     Severity.NO_RETRACTIONS: "NO RETRACTIONS",
+    Severity.UNVERIFIED: "UNVERIFIED",
 }
 
 ACTION = {
@@ -64,6 +75,7 @@ ACTION = {
     Severity.SUBSTANTIAL: "no review required, but the estimate moved",
     Severity.MINIMAL: "no review required",
     Severity.NO_RETRACTIONS: "no review required",
+    Severity.UNVERIFIED: "check the input against the published forest plot",
 }
 
 MODEL_LABEL = {"random": "random-effects", "fixed": "fixed-effect"}
@@ -130,20 +142,22 @@ def _pooled_block(title: str, result: PooledResult, measure: str, indent: str = 
     return lines
 
 
-def _reproduction_line(rep: Reproduction) -> str:
-    if rep.status == "unchecked":
-        return "not checked — this input declares no published estimate"
-    assert rep.difference_pct is not None and rep.reported is not None
-    if rep.ok:
-        return (
-            f"matches the published {fmt_value(rep.reported)} "
-            f"({fmt_pct(rep.difference_pct)})"
+def _gate_block(gate: Gate, color: bool) -> list[str]:
+    """The gate, printed before anything a reader might act on."""
+    headline = f"GATE: {gate.state.value.upper()} — {gate.describe()}"
+    out = ["GATE: " + paint(
+        f"{gate.state.value.upper()}", GATE_COLOR[gate.state], color
+    ) + f" — {gate.describe()}" if color else headline]
+    for c in gate.comparisons:
+        # Full precision here on purpose: rounding is the thing the gate
+        # adjudicates, so the forest-plot formatter would hide the evidence.
+        mark = " " if c.within else "!"
+        out.append(
+            f"  {mark} {c.name:<9} published {c.reported:<10.4f} "
+            f"computed {c.computed:<10.4f} "
+            f"difference {c.difference:+.5f}   tolerance {c.tolerance:g}"
         )
-    return (
-        f"FAILED — we compute {fmt_value(rep.computed or 0.0)} against a published "
-        f"{fmt_value(rep.reported)} ({fmt_pct(rep.difference_pct)}); "
-        f"treat the comparison below as unverified"
-    )
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -156,6 +170,11 @@ def render_analysis(
     """Build the report block for one meta-analysis."""
     out: list[str] = []
     n_retracted = len(ma.retracted_studies)
+
+    # The gate comes before anything else. A reader who stops after one line
+    # must still know whether these numbers are anchored to the paper.
+    out += _gate_block(impact.gate, color)
+    out.append("")
 
     out.append(f"Analysis: {paint(ma.id, BOLD, color)}")
     if ma.title:
@@ -171,17 +190,13 @@ def render_analysis(
     )
     out.append("")
 
-    # Reproduction gate. If we cannot reproduce what the paper printed, the
-    # recalculation below is not trustworthy and must be labelled as such.
-    rep = check_reproduction(ma)
-    out.append("Reproduction")
-    line = _reproduction_line(rep)
-    out.append("  " + (paint(line, COLOR[Severity.SIGNIFICANCE], color)
-                       if rep.status == "mismatch" else line))
-    out.append("")
-
     if impact.original is not None:
-        heading = "Pooled estimate" if not n_retracted else "Original"
+        if impact.severity is Severity.UNVERIFIED:
+            heading = "What ReMeta computes from these studies"
+        elif not n_retracted:
+            heading = "Pooled estimate"
+        else:
+            heading = "Original"
         out += _pooled_block(heading, impact.original, ma.measure)
         out.append("")
 
@@ -201,13 +216,17 @@ def render_analysis(
     if impact.severity is Severity.NO_RETRACTIONS:
         out.append("  No study in this file is marked retracted, so there is "
                    "nothing to remove.")
+    if impact.severity is Severity.UNVERIFIED:
+        out.append("  No verdict is issued. The gate above did not pass, so a "
+                   "recalculation")
+        out.append("  would not tell you anything about the published review.")
     if impact.evolution_pct is not None:
         out.append(f"  Change in estimate: {fmt_pct(impact.evolution_pct)}")
     if impact.removed:
         out.append(f"  Retracted weight:   {impact.retracted_weight_pct:.1f}%")
         out.append(f"  Removed:            {', '.join(impact.removed)}")
     for note in impact.notes:
-        out.append(f"  Note: {note}")
+        out += _wrap_note(note)
     out.append("")
 
     if show_loo:
@@ -215,6 +234,13 @@ def render_analysis(
 
     out.append(f"Action: {ACTION[impact.severity]}")
     return out
+
+
+def _wrap_note(note: str) -> list[str]:
+    """Wrap a note so a long explanation stays readable in a terminal."""
+    return textwrap.wrap(
+        note, width=74, initial_indent="  Note: ", subsequent_indent="        "
+    ) or ["  Note: " + note]
 
 
 def _loo_block(ma: MetaAnalysis, color: bool) -> list[str]:
@@ -270,13 +296,21 @@ def cmd_check(args) -> int:
     except DataError as exc:
         return _fail(exc)
 
-    results.sort(key=lambda pair: -pair[1].severity.rank)
+    # Anchored verdicts first, most severe first within each group. An
+    # unanchored verdict has nothing holding it to a published paper, so it
+    # never outranks one that does.
+    results.sort(key=lambda pair: (pair[1].gate.anchored, pair[1].severity.rank),
+                 reverse=True)
 
     if args.json:
         _emit_json(results)
     else:
         _emit_text(results, _use_color(args), args.loo)
 
+    if any(imp.severity is Severity.UNVERIFIED for _, imp in results):
+        # The strongest thing we can say about this batch is that part of it
+        # could not be verified, so that outranks an actionable verdict.
+        return 3
     return 1 if any(imp.severity.actionable for _, imp in results) else 0
 
 
@@ -292,13 +326,14 @@ def _emit_text(results, color: bool, show_loo: bool) -> None:
         print("\n".join(render_analysis(ma, impact, color, show_loo)))
         print()
     actionable = [imp for _, imp in results if imp.severity.actionable]
+    unverified = [imp for _, imp in results if imp.severity is Severity.UNVERIFIED]
     print(RULE)
     noun = "analysis" if len(results) == 1 else "analyses"
     verb = "needs" if len(actionable) == 1 else "need"
-    print(
-        f"{len(results)} {noun} checked · "
-        f"{len(actionable)} {verb} human review"
-    )
+    line = f"{len(results)} {noun} checked · {len(actionable)} {verb} human review"
+    if unverified:
+        line += f" · {len(unverified)} unverified"
+    print(line)
     print()
 
 
@@ -344,7 +379,7 @@ def _emit_json(results) -> None:
                 "gained_significance": imp.gained_significance,
                 "direction_reversed": imp.direction_reversed,
                 "within_original_ci": imp.within_original_ci,
-                "reproduction": _reproduction_dict(ma),
+                "gate": _gate_dict(imp.gate),
                 "original": _pooled_dict(imp.original),
                 "recalculated": _pooled_dict(imp.recalculated),
                 "notes": imp.notes,
@@ -355,16 +390,30 @@ def _emit_json(results) -> None:
     print(json.dumps(payload, indent=2))
 
 
-def _reproduction_dict(ma: MetaAnalysis) -> dict:
-    rep = check_reproduction(ma)
+def _gate_dict(gate: Gate) -> dict:
+    """The gate, as a pipeline reads it. This is the critical one.
+
+    JSON is what an automated consumer acts on, so the gate state travels
+    with every result and an unverified analysis carries actionable=false.
+    """
     return {
-        "status": rep.status,
-        "reported": rep.reported,
-        "computed": round(rep.computed, 6) if rep.computed is not None else None,
-        "difference_pct": (
-            round(rep.difference_pct, 3) if rep.difference_pct is not None else None
-        ),
-        "tolerance_pct": rep.tolerance_pct,
+        "state": gate.state.value,
+        "ok": gate.ok,
+        "anchored": gate.anchored,
+        "rule": gate.rule,
+        "rules_passed": list(gate.rules_passed),
+        "description": gate.describe(),
+        "comparisons": [
+            {
+                "name": c.name,
+                "reported": c.reported,
+                "computed": round(c.computed, 6),
+                "difference": round(c.difference, 6),
+                "tolerance": c.tolerance,
+                "within": c.within,
+            }
+            for c in gate.comparisons
+        ],
     }
 
 
@@ -436,6 +485,8 @@ exit codes:
   0  nothing needs human review
   1  at least one analysis needs human review
   2  usage or data error
+  3  at least one analysis failed the reproduction gate, so no verdict
+     could be issued for it
 
 Input is a JSON file describing one meta-analysis, or a list of them. See the
 README for the schema and data/examples for working files.
