@@ -32,7 +32,7 @@ from remeta import (
 from remeta import __version__
 from remeta.cli import build_parser, main
 from remeta.impact import leave_one_out, reproduces_reported
-from remeta.model import DataError, from_dict
+from remeta.model import DataError, DoubleZeroError, from_dict
 from remeta.stats import effect_size, z_quantile
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1015,6 +1015,212 @@ class TestCli(unittest.TestCase):
         code, _, err = run_cli("fragility", str(tmp))
         self.assertEqual(code, 2)
         self.assertIn("remeta: error:", err)
+
+
+# --------------------------------------------------------------------------
+# Phase 0 / R1: incidence rate ratios need person-time
+# --------------------------------------------------------------------------
+
+class TestIncidenceRateRatio(unittest.TestCase):
+    """An IRR needs person-time denominators, not participant totals."""
+
+    def test_irr_without_person_time_is_refused(self):
+        s = Study(id="s", events_treat=10, total_treat=100,
+                  events_control=20, total_control=100)
+        with self.assertRaises(DataError) as ctx:
+            effect_size(s, "IRR")
+        self.assertIn("person-time", str(ctx.exception))
+
+    def test_irr_uses_person_time_not_participants(self):
+        # 10 events / 500 py vs 20 events / 250 py -> IRR 0.25, log = -1.3863
+        s = Study(id="s", events_treat=10, person_time_treat=500,
+                  events_control=20, person_time_control=250)
+        yi, vi = effect_size(s, "IRR")
+        self.assertAlmostEqual(yi, -1.386294, places=5)
+        self.assertAlmostEqual(vi, 1 / 10 + 1 / 20, places=9)
+
+    def test_person_time_study_needs_no_participant_totals(self):
+        s = Study(id="s", events_treat=10, person_time_treat=500,
+                  events_control=20, person_time_control=250)
+        self.assertTrue(s.has_person_time)
+        self.assertFalse(s.has_table)
+
+    def test_person_time_must_be_positive(self):
+        with self.assertRaises(DataError):
+            Study(id="s", events_treat=10, person_time_treat=0,
+                  events_control=20, person_time_control=250)
+        with self.assertRaises(DataError):
+            Study(id="s", events_treat=10, person_time_treat=-5,
+                  events_control=20, person_time_control=250)
+
+    def test_person_time_does_not_make_a_risk_ratio_computable(self):
+        """Rates carry no participant denominator, so RR is not derivable."""
+        s = Study(id="s", events_treat=10, person_time_treat=500,
+                  events_control=20, person_time_control=250)
+        with self.assertRaises(DataError):
+            effect_size(s, "RR")
+
+    def test_irr_pools_from_person_time(self):
+        studies = [
+            Study(id="a", events_treat=10, person_time_treat=500,
+                  events_control=20, person_time_control=250),
+            Study(id="b", events_treat=12, person_time_treat=600,
+                  events_control=22, person_time_control=280),
+        ]
+        result = pool(studies, "IRR", model="fixed")
+        self.assertLess(result.estimate, 1.0)   # reported exponentiated
+        self.assertEqual(result.k, 2)
+
+    def test_irr_zero_in_one_arm_gets_the_continuity_correction(self):
+        s = Study(id="s", events_treat=0, person_time_treat=500,
+                  events_control=20, person_time_control=250)
+        yi, vi = effect_size(s, "IRR")
+        self.assertTrue(yi == yi and vi == vi)   # not NaN
+        self.assertGreater(vi, 0)
+        self.assertLess(yi, 0)
+
+    def test_irr_from_precomputed_effect_still_works(self):
+        s = Study(id="s", yi=-1.2, vi=0.05)
+        self.assertEqual(effect_size(s, "IRR"), (-1.2, 0.05))
+
+    def test_person_time_loads_from_json(self):
+        payload = {
+            "id": "rates", "measure": "IRR", "model": "fixed",
+            "studies": [
+                {"id": "a", "events_treat": 10, "person_time_treat": 500,
+                 "events_control": 20, "person_time_control": 250},
+                {"id": "b", "events_treat": 12, "person_time_treat": 600,
+                 "events_control": 22, "person_time_control": 280},
+            ],
+        }
+        tmp = Path(tempfile.mkdtemp()) / "rates.json"
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        ma = load(tmp)[0]
+        self.assertAlmostEqual(pool_meta(ma).estimate_log, -1.3, delta=0.2)
+
+
+# --------------------------------------------------------------------------
+# Phase 0 / R1: double-zero studies
+# --------------------------------------------------------------------------
+
+class TestDoubleZeroStudies(unittest.TestCase):
+    """A study with no events in either arm carries no information."""
+
+    def _rows(self):
+        return [
+            Study(id="dz", events_treat=0, total_treat=50,
+                  events_control=0, total_control=50),
+            Study(id="a", events_treat=5, total_treat=50,
+                  events_control=10, total_control=50),
+            Study(id="b", events_treat=6, total_treat=50,
+                  events_control=11, total_control=50),
+        ]
+
+    def test_effect_size_raises_double_zero_error(self):
+        dz = self._rows()[0]
+        for measure in ("RR", "OR", "RD"):
+            with self.subTest(measure=measure):
+                with self.assertRaises(DoubleZeroError):
+                    effect_size(dz, measure)
+
+    def test_double_zero_error_is_a_data_error(self):
+        self.assertTrue(issubclass(DoubleZeroError, DataError))
+
+    def test_double_zero_excluded_from_rr_by_default(self):
+        result = pool(self._rows(), "RR", "fixed")
+        self.assertEqual(result.k, 2)
+        self.assertNotIn("dz", result.weights)
+
+    def test_double_zero_excluded_from_or_by_default(self):
+        result = pool(self._rows(), "OR", "fixed")
+        self.assertEqual(result.k, 2)
+        self.assertNotIn("dz", result.weights)
+
+    def test_exclusion_is_recorded_on_the_result(self):
+        result = pool(self._rows(), "RR", "fixed")
+        self.assertIn("dz", result.excluded)
+        self.assertIn("no events in either arm", result.excluded["dz"])
+
+    def test_double_zero_included_when_requested(self):
+        """include_double_zero=True is the path software-fingerprinting needs."""
+        result = pool(self._rows(), "RR", "fixed", include_double_zero=True)
+        self.assertEqual(result.k, 3)
+        self.assertIn("dz", result.weights)
+        self.assertEqual(result.excluded, {})
+
+    def test_included_double_zero_reproduces_the_uncorrected_values(self):
+        dz = self._rows()[0]
+        yi, vi = effect_size(dz, "RR", include_double_zero=True)
+        self.assertAlmostEqual(yi, 0.0, places=12)
+        self.assertAlmostEqual(vi, 3.9607843137254903, places=9)
+
+    def test_double_zero_kept_for_risk_difference_as_an_estimate(self):
+        """RD is estimable at zero, so the point estimate exists...
+
+        ...but its variance is exactly zero, so it cannot carry an
+        inverse-variance weight. It is excluded from pooling with that
+        reason recorded, rather than given an infinite weight.
+        """
+        dz = self._rows()[0]
+        with self.assertRaises(DoubleZeroError) as ctx:
+            effect_size(dz, "RD")
+        self.assertIn("zero variance", str(ctx.exception))
+        result = pool(self._rows(), "RD", "fixed")
+        self.assertEqual(result.k, 2)
+        self.assertIn("dz", result.excluded)
+
+    def test_double_zero_cannot_be_included_for_risk_difference(self):
+        with self.assertRaises(DataError):
+            pool(self._rows(), "RD", "fixed", include_double_zero=True)
+
+    def test_all_double_zero_leaves_nothing_to_pool(self):
+        studies = [
+            Study(id="x", events_treat=0, total_treat=40,
+                  events_control=0, total_control=40),
+            Study(id="y", events_treat=0, total_treat=30,
+                  events_control=0, total_control=30),
+        ]
+        with self.assertRaises(DataError) as ctx:
+            pool(studies, "RR", "fixed")
+        self.assertIn("no events in either arm", str(ctx.exception))
+
+    def test_single_zero_arm_is_still_pooled_with_correction(self):
+        """Only DOUBLE zeros are excluded; a single zero arm is corrected."""
+        studies = [
+            Study(id="one-zero", events_treat=0, total_treat=50,
+                  events_control=5, total_control=50),
+            Study(id="a", events_treat=5, total_treat=50,
+                  events_control=10, total_control=50),
+        ]
+        result = pool(studies, "RR", "fixed")
+        self.assertEqual(result.k, 2)
+        self.assertEqual(result.excluded, {})
+
+    def test_exclusions_surface_in_impact_notes(self):
+        rows = self._rows()
+        rows[1].retracted = True
+        ma = MetaAnalysis(id="m", measure="RR", studies=rows, model="fixed")
+        impact = analyse(ma)
+        self.assertTrue(any("dz" in note for note in impact.notes))
+
+    def test_exclusions_surface_in_json_output(self):
+        payload = {
+            "id": "dzjson", "measure": "RR", "model": "fixed",
+            "reported_estimate": 0.5,
+            "studies": [
+                {"id": "dz", "events_treat": 0, "total_treat": 50,
+                 "events_control": 0, "total_control": 50},
+                {"id": "a", "events_treat": 5, "total_treat": 50,
+                 "events_control": 10, "total_control": 50, "retracted": True},
+                {"id": "b", "events_treat": 6, "total_treat": 50,
+                 "events_control": 11, "total_control": 50},
+            ],
+        }
+        tmp = Path(tempfile.mkdtemp()) / "dz.json"
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        _, out, _ = run_cli("check", str(tmp), "--json")
+        result = json.loads(out)["results"][0]
+        self.assertIn("dz", result["original"]["excluded"])
 
 
 if __name__ == "__main__":
