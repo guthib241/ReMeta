@@ -1,0 +1,122 @@
+{
+  "id": "bcg-colditz-1994",
+  "measure": "RR",
+  "model": "random",
+  "title": "BCG vaccine and tuberculosis (Colditz et al. 1994)",
+  "outcome": "Incident tuberculosis",
+  "is_primary_outcome": true,
+  "reported_estimate": 0.4896,
+  "reported_ci_low": 0.3449,
+  "reported_ci_high": 0.695,
+  "metadata": {
+    "purpose": "Reference dataset. Published DerSimonian-Laird values are widely reproduced (metafor::dat.bcg): log RR -0.7141, SE 0.1787, tau^2 0.3088, Q 152.23 on 12 df, I^2 92.1%. Used to verify ReMeta's pooling against an independent implementation.",
+    "source": "Colditz GA, Brewer TF, Berkey CS, et al. Efficacy of BCG vaccine in the prevention of tuberculosis: meta-analysis of the published literature. JAMA. 1994;271(9):698-702.",
+    "no_retractions": "None of these trials are retracted. This file validates the maths, not the retraction logic."
+  },
+  "studies": [
+    {
+      "id": "Aronson 1948",
+      "events_treat": 4,
+      "total_treat": 123,
+      "events_control": 11,
+      "total_control": 139,
+      "year": 1948
+    },
+    {
+      "id": "Ferguson & Simes 1949",
+      "events_treat": 6,
+      "total_treat": 306,
+      "events_control": 29,
+      "total_control": 303,
+      "year": 1949
+    },
+    {
+      "id": "Rosenthal 1960",
+      "events_treat": 3,
+      "total_treat": 231,
+      "events_control": 11,
+      "total_control": 220,
+      "year": 1960
+    },
+    {
+      "id": "Hart & Sutherland 1977",
+      "events_treat": 62,
+      "total_treat": 13598,
+      "events_control": 248,
+      "total_control": 12867,
+      "year": 1977
+    },
+    {
+      "id": "Frimodt-Moller 1973",
+      "events_treat": 33,
+      "total_treat": 5069,
+      "events_control": 47,
+      "total_control": 5808,
+      "year": 1973
+    },
+    {
+      "id": "Stein & Aronson 1953",
+      "events_treat": 180,
+      "total_treat": 1541,
+      "events_control": 372,
+      "total_control": 1451,
+      "year": 1953
+    },
+    {
+      "id": "Vandiviere 1973",
+      "events_treat": 8,
+      "total_treat": 2545,
+      "events_control": 10,
+      "total_control": 629,
+      "year": 1973
+    },
+    {
+      "id": "TPT Madras 1980",
+      "events_treat": 505,
+      "total_treat": 88391,
+      "events_control": 499,
+      "total_control": 88391,
+      "year": 1980
+    },
+    {
+      "id": "Coetzee & Berjak 1968",
+      "events_treat": 29,
+      "total_treat": 7499,
+      "events_control": 45,
+      "total_control": 7277,
+      "year": 1968
+    },
+    {
+      "id": "Rosenthal 1961",
+      "events_treat": 17,
+      "total_treat": 1716,
+      "events_control": 65,
+      "total_control": 1665,
+      "year": 1961
+    },
+    {
+      "id": "Comstock 1974",
+      "events_treat": 186,
+      "total_treat": 50634,
+      "events_control": 141,
+      "total_control": 27338,
+      "year": 1974
+    },
+    {
+      "id": "Comstock & Webster 1969",
+      "events_treat": 5,
+      "total_treat": 2498,
+      "events_control": 3,
+      "total_control": 2341,
+      "year": 1969
+    },
+    {
+      "id": "Comstock 1976",
+      "events_treat": 27,
+      "total_treat": 16913,
+      "events_control": 29,
+      "total_control": 17854,
+      "year": 1976
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "id": "example-direction-reversal",
+  "measure": "OR",
+  "model": "fixed",
+  "title": "Worked example: retraction reverses the direction of effect",
+  "outcome": "Synthetic outcome",
+  "reported_estimate": null,
+  "metadata": {
+    "purpose": "Synthetic data demonstrating the REVERSED severity class: the pooled effect crosses the null once the fabricated trial is removed. Not real trial data.",
+    "reported_estimate": "Deliberately absent, so this example also shows what ReMeta prints when there is no published estimate to reproduce: the comparison is reported as unchecked rather than as verified."
+  },
+  "studies": [
+    {
+      "id": "Fabricated 2014",
+      "yi": -1.1,
+      "vi": 0.008,
+      "retracted": true,
+      "retraction_reason": "Image duplication"
+    },
+    {
+      "id": "Genuine A 2017",
+      "yi": 0.18,
+      "vi": 0.02
+    },
+    {
+      "id": "Genuine B 2019",
+      "yi": 0.22,
+      "vi": 0.022
+    }
+  ]
+}

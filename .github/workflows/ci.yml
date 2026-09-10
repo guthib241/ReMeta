@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install ReMeta
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Run the test suite
+        run: python -m unittest discover -v
+
+      # The commands in the README must keep working, exit codes included:
+      # 0 means nothing needs review, 1 means something does.
+      - name: Run the documented examples
+        shell: bash
+        run: |
+          expect_exit() {
+            local want="$1"; shift
+            local got=0
+            "$@" > /dev/null || got=$?
+            if [ "$got" -ne "$want" ]; then
+              echo "FAIL: '$*' exited $got, expected $want"
+              return 1
+            fi
+            echo "ok (exit $got): $*"
+          }
+          set -e
+          expect_exit 0 remeta --version
+          expect_exit 0 python -m remeta --version
+          expect_exit 0 remeta check data/bcg_colditz_1994.json
+          expect_exit 0 remeta fragility data/bcg_colditz_1994.json
+          expect_exit 1 remeta check data/examples/example-significance-loss.json
+          expect_exit 1 remeta check data/examples/example-direction-reversal.json
+          expect_exit 1 remeta check data/examples/example-significance-loss.json --loo
+          expect_exit 1 remeta check data/examples/example-significance-loss.json --json
+          expect_exit 2 remeta check no-such-file.json
+
+  package:
+    name: package and dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ReMeta is standard library only by design. If a third-party import
+      # ever appears in src/, this fails rather than quietly adding a
+      # dependency to a tool meant to run anywhere.
+      - name: Verify the package imports nothing but the standard library
+        run: |
+          python - <<'PY'
+          import ast, pathlib, sys
+
+          imported = set()
+          for file in sorted(pathlib.Path("src").rglob("*.py")):
+              tree = ast.parse(file.read_text(encoding="utf-8"))
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      imported.update(a.name.split(".")[0] for a in node.names)
+                  elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                      imported.add(node.module.split(".")[0])
+
+          third_party = sorted(
+              m for m in imported
+              if m not in sys.stdlib_module_names and m != "remeta"
+          )
+          if third_party:
+              sys.exit(f"third-party imports found in src/: {third_party}")
+          print("standard library only: ok")
+          PY
+
+      - name: Build the sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Install the built wheel and smoke-test it
+        run: |
+          python -m pip install dist/*.whl
+          remeta --version
+          remeta check data/bcg_colditz_1994.json

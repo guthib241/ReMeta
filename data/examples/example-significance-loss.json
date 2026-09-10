@@ -1,0 +1,36 @@
+{
+  "id": "example-significance-loss",
+  "measure": "RR",
+  "model": "random",
+  "title": "Worked example: retraction removes statistical significance",
+  "outcome": "Synthetic outcome",
+  "reported_estimate": 0.74,
+  "metadata": {
+    "purpose": "Synthetic data demonstrating the SIGNIFICANCE severity class: a significant pooled benefit becomes non-significant once the fabricated trial is removed. Not real trial data.",
+    "reported_estimate": "The rounded value a review reporting this forest plot would have printed. It is here so the example also exercises the reproduction gate, which accepts a match within 5%."
+  },
+  "studies": [
+    {
+      "id": "Fabricated 2015",
+      "yi": -0.6,
+      "vi": 0.01,
+      "retracted": true,
+      "retraction_reason": "Data fabrication"
+    },
+    {
+      "id": "Genuine A 2016",
+      "yi": -0.2,
+      "vi": 0.03
+    },
+    {
+      "id": "Genuine B 2018",
+      "yi": -0.18,
+      "vi": 0.035
+    },
+    {
+      "id": "Genuine C 2020",
+      "yi": -0.12,
+      "vi": 0.04
+    }
+  ]
+}

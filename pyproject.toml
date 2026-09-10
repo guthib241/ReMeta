@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "remeta"
+version = "0.1.0"
+description = "Reassess meta-analysis results after study retractions."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "ACHANTI Sri Vardhan" }]
+keywords = [
+    "meta-analysis",
+    "retraction",
+    "research-integrity",
+    "evidence-synthesis",
+    "systematic-review",
+    "reproducibility",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Healthcare Industry",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Typing :: Typed",
+]
+# ReMeta is standard library only, by design. The chi-square tail and normal
+# quantiles are implemented directly so it runs anywhere Python does.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/guthib241/ReMeta"
+Repository = "https://github.com/guthib241/ReMeta"
+Issues = "https://github.com/guthib241/ReMeta/issues"
+Validation = "https://github.com/guthib241/ReMeta/blob/main/docs/VALIDATION.md"
+
+[project.scripts]
+remeta = "remeta.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
