@@ -27,11 +27,14 @@ from .impact import (
     reproduces_reported,
 )
 from .model import (
+    COUNT_MEASURES,
     DIFFERENCE_MEASURES,
     MEASURES,
+    RATE_MEASURES,
     RATIO_MEASURES,
     TABLE_MEASURES,
     DataError,
+    DoubleZeroError,
     MetaAnalysis,
     Study,
     from_dict,
@@ -56,6 +59,7 @@ __all__ = [
     "REPRODUCTION_TOLERANCE",
     # data model
     "DataError",
+    "DoubleZeroError",
     "MetaAnalysis",
     "Study",
     "from_dict",
@@ -64,6 +68,8 @@ __all__ = [
     "RATIO_MEASURES",
     "DIFFERENCE_MEASURES",
     "TABLE_MEASURES",
+    "RATE_MEASURES",
+    "COUNT_MEASURES",
     # statistics
     "PooledResult",
     "effect_size",

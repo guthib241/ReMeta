@@ -126,6 +126,18 @@ class Impact:
         )
 
 
+def _exclusion_notes(*results: PooledResult | None) -> list[str]:
+    """Report every study a pooled estimate left out, and why."""
+    seen: dict[str, str] = {}
+    for result in results:
+        if result is not None:
+            seen.update(result.excluded)
+    return [
+        f"study {sid!r} was excluded from pooling: {why}"
+        for sid, why in seen.items()
+    ]
+
+
 def _percent_change(new: float, old: float) -> float | None:
     if old == 0:
         return None
@@ -151,6 +163,7 @@ def analyse(
             severity=Severity.NO_RETRACTIONS,
             original=original,
             recalculated=None,
+            notes=_exclusion_notes(original),
         )
 
     retracted_weight = sum(original.weights.get(sid, 0.0) for sid in removed)
@@ -163,7 +176,7 @@ def analyse(
             recalculated=None,
             removed=removed,
             retracted_weight_pct=retracted_weight,
-            notes=[
+            notes=_exclusion_notes(original) + [
                 f"only {len(survivors)} study(ies) remain; the pooled result "
                 "cannot be reproduced without the retracted work"
             ],
@@ -198,7 +211,7 @@ def analyse(
     else:
         severity = Severity.MINIMAL
 
-    notes: list[str] = []
+    notes: list[str] = _exclusion_notes(original, recalculated)
     if retracted_weight >= 50:
         notes.append(
             f"retracted studies carried {retracted_weight:.1f}% of the pooled weight"

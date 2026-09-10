@@ -316,6 +316,7 @@ def _pooled_dict(result: PooledResult | None) -> dict | None:
         "q": round(result.q, 4),
         "q_df": result.q_df,
         "model": result.model,
+        "excluded": result.excluded,
     }
 
 

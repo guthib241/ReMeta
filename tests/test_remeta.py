@@ -231,10 +231,19 @@ class TestEffectSizes(unittest.TestCase):
         import math
         self.assertAlmostEqual(yi, math.log((1/50) / (5/50)), places=12)
 
-    def test_double_zero_study_still_yields_a_finite_effect(self):
+    def test_double_zero_study_is_refused_not_corrected(self):
+        """Contract changed in Phase 0 R1.
+
+        This test previously asserted that a double-zero study yielded a
+        finite corrected effect. That was the defect: the correction handed a
+        study with no events a real pooled weight. It is now refused, and
+        TestDoubleZeroStudies covers the exclusion behaviour in full.
+        """
         s = Study(id="s", events_treat=0, total_treat=40,
                   events_control=0, total_control=40)
-        yi, vi = effect_size(s, "RR")
+        with self.assertRaises(DoubleZeroError):
+            effect_size(s, "RR")
+        yi, vi = effect_size(s, "RR", include_double_zero=True)
         self.assertAlmostEqual(yi, 0.0, places=12)
         self.assertGreater(vi, 0)
 

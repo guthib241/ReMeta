@@ -22,16 +22,23 @@ RATIO_MEASURES = {"RR", "OR", "HR", "IRR"}
 DIFFERENCE_MEASURES = {"MD", "SMD", "RD"}
 MEASURES = RATIO_MEASURES | DIFFERENCE_MEASURES
 
-# Measures that can be derived from a 2x2 table of events and totals. A hazard
-# ratio needs time-to-event data and an incidence rate ratio needs person-time,
-# so neither can be reconstructed from counts alone; supply (yi, vi) for those.
+# Measures that can be derived from a 2x2 table of events and participant
+# totals. A hazard ratio needs time-to-event data, so it can never be
+# reconstructed from counts; supply (yi, vi) for it.
 TABLE_MEASURES = {"RR", "OR", "RD"}
+
+# Measures that can be derived from event counts plus person-time at risk.
+RATE_MEASURES = {"IRR"}
+
+# Every measure derivable from counts, by either route.
+COUNT_MEASURES = TABLE_MEASURES | RATE_MEASURES
 
 MODELS = ("random", "fixed")
 
 Measure = Literal["RR", "OR", "HR", "IRR", "MD", "SMD", "RD"]
 
 TABLE_FIELDS = ("events_treat", "total_treat", "events_control", "total_control")
+RATE_FIELDS = ("events_treat", "person_time_treat", "events_control", "person_time_control")
 
 
 class DataError(ValueError):
@@ -39,6 +46,17 @@ class DataError(ValueError):
 
     The message is written for a researcher rather than a Python developer:
     it names the record at fault and, where possible, how to fix it.
+    """
+
+
+class DoubleZeroError(DataError):
+    """Raised for a study with no events in either arm.
+
+    Such a study carries no information about a ratio contrast, and its risk
+    difference has a variance of exactly zero, so it cannot receive an
+    inverse-variance weight. `pool` catches this, drops the study and records
+    the exclusion rather than letting it enter the analysis with a
+    continuity-corrected weight it has not earned.
     """
 
 
@@ -71,6 +89,9 @@ class Study:
     total_treat: int | None = None
     events_control: int | None = None
     total_control: int | None = None
+    # Rate path: person-time at risk per arm, for incidence rate ratios.
+    person_time_treat: float | None = None
+    person_time_control: float | None = None
     # Provenance
     doi: str | None = None
     year: int | None = None
@@ -83,8 +104,27 @@ class Study:
         return all(getattr(self, name) is not None for name in TABLE_FIELDS)
 
     @property
+    def has_person_time(self) -> bool:
+        """Whether this study supplies event counts with person-time at risk."""
+        return all(getattr(self, name) is not None for name in RATE_FIELDS)
+
+    @property
     def has_effect(self) -> bool:
         return self.yi is not None and self.vi is not None
+
+    @property
+    def is_double_zero(self) -> bool:
+        """Whether both arms recorded zero events.
+
+        Only meaningful for a study supplied as counts. A study given as a
+        precomputed effect is never treated as a double zero, because the
+        review has already decided how to handle it.
+        """
+        if self.has_effect:
+            return False
+        if not (self.has_table or self.has_person_time):
+            return False
+        return self.events_treat == 0 and self.events_control == 0
 
     def __post_init__(self) -> None:
         if not self.id or not isinstance(self.id, str):
@@ -99,11 +139,22 @@ class Study:
             value = getattr(self, name)
             if value is not None:
                 setattr(self, name, int(_number(value, f"{where}: {name!r}", integral=True)))
+        for name in ("person_time_treat", "person_time_control"):
+            value = getattr(self, name)
+            if value is not None:
+                value = _number(value, f"{where}: {name!r}")
+                if value <= 0:
+                    raise DataError(
+                        f"{where}: {name!r} is person-time at risk and must be "
+                        f"positive, got {value}"
+                    )
+                setattr(self, name, value)
 
-        if not self.has_table and not self.has_effect:
+        if not self.has_table and not self.has_effect and not self.has_person_time:
             raise DataError(
-                f"{where}: needs either a 2x2 table "
-                f"({', '.join(TABLE_FIELDS)}) or a precomputed effect "
+                f"{where}: needs a 2x2 table ({', '.join(TABLE_FIELDS)}), "
+                f"event counts with person-time "
+                f"({', '.join(RATE_FIELDS)}), or a precomputed effect "
                 f"('yi' with 'vi'). " + self._missing_hint()
             )
         if self.has_effect and self.vi is not None and self.vi <= 0:
@@ -126,6 +177,9 @@ class Study:
                     )
 
     def _missing_hint(self) -> str:
+        if self.person_time_treat is not None or self.person_time_control is not None:
+            missing = [n for n in RATE_FIELDS if getattr(self, n) is None]
+            return f"The rate data is incomplete; add: {', '.join(missing)}."
         given = [n for n in TABLE_FIELDS if getattr(self, n) is not None]
         if given:
             missing = [n for n in TABLE_FIELDS if getattr(self, n) is None]
