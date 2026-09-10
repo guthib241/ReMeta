@@ -208,6 +208,11 @@ class MetaAnalysis:
     source_doi: str = ""
     outcome: str = ""
     is_primary_outcome: bool = True
+    # True when the studies marked retracted are NOT actually retracted and
+    # this analysis is a hypothetical "what if they were removed". Presenting
+    # such a removal as a retraction would tell a reader that real trials had
+    # been retracted, so ReMeta banners it and cannot be told not to.
+    simulated_removal: bool = False
     # What the paper itself reported, for reproduction checks.
     reported_estimate: float | None = None
     reported_ci_low: float | None = None

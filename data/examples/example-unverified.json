@@ -1,0 +1,38 @@
+{
+  "id": "example-unverified",
+  "measure": "RR",
+  "model": "random",
+  "title": "Worked example: the published result cannot be reproduced",
+  "outcome": "Synthetic outcome",
+  "reported_estimate": 0.30,
+  "reported_ci_low": 0.18,
+  "reported_ci_high": 0.50,
+  "metadata": {
+    "purpose": "Synthetic data demonstrating the reproduction gate firing. The study rows pool to about 0.74, not the 0.30 this record claims was published, so ReMeta refuses to issue a verdict and reports UNVERIFIED. Not real trial data.",
+    "why_it_matters": "A recalculation you cannot anchor to the published result is a different analysis wearing the same name. The mismatch is a verification problem to investigate in the input data, not a finding about the review."
+  },
+  "studies": [
+    {
+      "id": "Fabricated 2015",
+      "yi": -0.6,
+      "vi": 0.01,
+      "retracted": true,
+      "retraction_reason": "Data fabrication"
+    },
+    {
+      "id": "Genuine A 2016",
+      "yi": -0.2,
+      "vi": 0.03
+    },
+    {
+      "id": "Genuine B 2018",
+      "yi": -0.18,
+      "vi": 0.035
+    },
+    {
+      "id": "Genuine C 2020",
+      "yi": -0.12,
+      "vi": 0.04
+    }
+  ]
+}

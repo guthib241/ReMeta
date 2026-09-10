@@ -80,6 +80,14 @@ ACTION = {
 
 MODEL_LABEL = {"random": "random-effects", "fixed": "fixed-effect"}
 
+#: Printed whenever an analysis declares simulated_removal. There is no flag
+#: to suppress it and there must never be one: without it a reader sees real
+#: trials under "removed" and concludes they were retracted.
+SIMULATED_BANNER = (
+    "SIMULATED REMOVAL — the studies removed below are NOT retracted. "
+    "This is a hypothetical recalculation, not a retraction impact."
+)
+
 
 class _HelpFormatter(argparse.RawDescriptionHelpFormatter):
     """Keep the hand-written epilog verbatim, but widen the option column."""
@@ -170,6 +178,10 @@ def render_analysis(
     """Build the report block for one meta-analysis."""
     out: list[str] = []
     n_retracted = len(ma.retracted_studies)
+
+    if ma.simulated_removal:
+        out += textwrap.wrap(SIMULATED_BANNER, width=74)
+        out.append("")
 
     # The gate comes before anything else. A reader who stops after one line
     # must still know whether these numbers are anchored to the paper.
@@ -367,6 +379,8 @@ def _emit_json(results) -> None:
                 "measure": ma.measure,
                 "model": ma.model,
                 "primary_outcome": ma.is_primary_outcome,
+                "simulated_removal": ma.simulated_removal,
+                "banner": SIMULATED_BANNER if ma.simulated_removal else None,
                 "severity": imp.severity.value,
                 "actionable": imp.severity.actionable,
                 "action": ACTION[imp.severity],
