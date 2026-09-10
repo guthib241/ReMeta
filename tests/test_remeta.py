@@ -825,7 +825,10 @@ class TestGateGovernsTheVerdict(unittest.TestCase):
         self.assertTrue(any("reproduce" in note for note in impact.notes))
 
     def test_partial_gate_allows_a_verdict(self):
+        """Estimate reported, interval not: weaker check, verdict still given."""
         ma = load(EXAMPLES_DIR / "example-significance-loss.json")[0]
+        ma.reported_ci_low = None
+        ma.reported_ci_high = None
         impact = analyse(ma)
         self.assertIs(impact.gate.state, GateState.PARTIAL)
         self.assertIs(impact.severity, Severity.SIGNIFICANCE)
@@ -948,7 +951,10 @@ class TestShippedExamples(unittest.TestCase):
 
     def test_significance_example_passes_its_gate(self):
         ma = load(EXAMPLES_DIR / "example-significance-loss.json")[0]
-        self.assertIs(check_gate(ma).state, GateState.PARTIAL)
+        gate = check_gate(ma)
+        self.assertIs(gate.state, GateState.REPRODUCED)
+        self.assertIn("absolute", gate.rules_passed)
+        self.assertIn("precision", gate.rules_passed)
 
     def test_reversal_example_declares_no_published_estimate(self):
         ma = load(EXAMPLES_DIR / "example-direction-reversal.json")[0]
@@ -1113,7 +1119,7 @@ class TestCli(unittest.TestCase):
         self.assertTrue(result["actionable"])
         self.assertTrue(result["lost_significance"])
         self.assertEqual(result["removed"], ["Fabricated 2015"])
-        self.assertEqual(result["gate"]["state"], "partial")
+        self.assertEqual(result["gate"]["state"], "reproduced")
         self.assertLess(result["original"]["p_value"], 0.05)
         self.assertGreater(result["recalculated"]["p_value"], 0.05)
 

@@ -150,16 +150,9 @@ class Gate:
             return "nothing published to check against; this verdict is unanchored"
         if self.state is GateState.FAILED:
             return "cannot reproduce the published result; no verdict is issued"
-        published = next(
-            (c.reported for c in self.comparisons if c.name == "estimate"), None
-        )
-        anchor = f" {published:g}" if published is not None else ""
         if self.state is GateState.PARTIAL:
-            return (
-                f"reproduces the published estimate{anchor} "
-                f"({self.rule} rule); no published interval to check"
-            )
-        return f"reproduces the published estimate{anchor} and interval ({self.rule} rule)"
+            return f"reproduces the published estimate ({self.rule} rule)"
+        return f"reproduces the published estimate and interval ({self.rule} rule)"
 
 
 def precision_tolerance(reported: float) -> float:

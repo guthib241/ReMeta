@@ -5,9 +5,11 @@
   "title": "Worked example: retraction removes statistical significance",
   "outcome": "Synthetic outcome",
   "reported_estimate": 0.74,
+  "reported_ci_low": 0.56,
+  "reported_ci_high": 0.96,
   "metadata": {
     "purpose": "Synthetic data demonstrating the SIGNIFICANCE severity class: a significant pooled benefit becomes non-significant once the fabricated trial is removed. Not real trial data.",
-    "reported_estimate": "The rounded value a review reporting this forest plot would have printed. It is here so the example also exercises the reproduction gate, which accepts a match within 5%."
+    "reported_estimate": "The values a review reporting this forest plot would have printed, rounded to two decimals as journals do. They are here so the example exercises the reproduction gate: ReMeta must reproduce them before it will compare anything."
   },
   "studies": [
     {
