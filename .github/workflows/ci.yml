@@ -57,6 +57,61 @@ jobs:
           expect_exit 1 remeta check data/examples/example-significance-loss.json --loo
           expect_exit 1 remeta check data/examples/example-significance-loss.json --json
           expect_exit 2 remeta check no-such-file.json
+          # The gate fires and refuses to issue a verdict.
+          expect_exit 3 remeta check data/examples/example-unverified.json
+          expect_exit 3 remeta check data/examples/example-unverified.json --json
+
+  claims:
+    name: every number traces to a source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Two checks, both in one stdlib script:
+      #  - a number cannot appear in the README without someone having said
+      #    in CLAIMS.md where it came from
+      #  - a citation this project once got wrong cannot come back
+      - name: Lint public claims and attributions
+        run: python scripts/claims_lint.py
+
+  readme:
+    name: README walkthrough on a clean checkout
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The quick start, run verbatim as written, with nothing pre-set. The
+      # first thing a stranger types has to work.
+      - name: Quick start, exactly as documented
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv .venv
+          source .venv/bin/activate
+          python -m pip install -e .
+          remeta --help
+          remeta check data/examples/example-significance-loss.json || [ $? -eq 1 ]
+
+      # The no-install route the README also documents.
+      - name: Run from a clone without installing
+        shell: bash
+        run: |
+          got=0
+          PYTHONPATH=src python3 -m remeta check \
+            data/examples/example-significance-loss.json > /dev/null || got=$?
+          if [ "$got" -ne 1 ]; then
+            echo "FAIL: PYTHONPATH route exited $got, expected 1"
+            exit 1
+          fi
+          echo "ok (exit 1): PYTHONPATH=src python3 -m remeta check"
 
   package:
     name: package and dependency audit

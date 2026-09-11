@@ -981,6 +981,29 @@ class TestCli(unittest.TestCase):
     def test_parser_builds(self):
         self.assertIsNotNone(build_parser())
 
+    def test_readme_headline_block_matches_real_output(self):
+        """The README's worked output must be what the tool actually prints.
+
+        The first ```text block in the README is captured from
+        `remeta check data/examples/example-significance-loss.json`. This test
+        re-runs that command and fails if the two have drifted, so no number
+        shown on the project's front page can go stale. CLAIMS.md cites this
+        test as the proof for those numbers.
+        """
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        marker = "```text\n"
+        start = readme.index(marker) + len(marker)
+        block = readme[start:readme.index("```", start)]
+
+        _, live, _ = run_cli("check", self.SIG_LOSS, "--no-color")
+        self.assertEqual(
+            block.strip().splitlines(),
+            live.strip().splitlines(),
+            "README.md's headline output block no longer matches the real "
+            "output of `remeta check data/examples/example-significance-loss"
+            ".json --no-color`. Re-capture it.",
+        )
+
     def test_no_arguments_prints_help_and_fails(self):
         code, out, _ = run_cli()
         self.assertEqual(code, 2)

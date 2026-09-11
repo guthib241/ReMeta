@@ -43,6 +43,15 @@ comparing our output to our output. An external reference.
    wrong with which record, and where practical how to fix it. Every input
    problem should surface as a `DataError`, never a traceback.
 6. **Keep the public API small.** Everything exported from `remeta` is a promise.
+7. **Never compute a measure from inputs that cannot produce it.** Returning a
+   different quantity than the one requested is the worst bug available here,
+   because the output looks right. Refuse, and say which field to supply.
+8. **Every number in a public document needs an entry in
+   [CLAIMS.md](CLAIMS.md).** Continuous integration fails otherwise. Give a
+   source as a DOI plus a location in the paper, or the test that proves it.
+9. **Write the failing test first**, commit it, then the fix. If a change alters
+   a behaviour an existing test asserts, say so in the commit message: that is
+   the difference between a specification change and a moved goalpost.
 
 ## Style
 

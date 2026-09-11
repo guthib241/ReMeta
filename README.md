@@ -15,15 +15,17 @@ estimate, and tells you whether the conclusion actually changed.
 ReMeta 0.1.0
 ──────────────────────────────────────────────────────────
 
+GATE: REPRODUCED — reproduces the published estimate and interval (absolute rule)
+    estimate  published 0.7400     computed 0.7351     difference -0.00491   tolerance 0.01
+    ci_low    published 0.5600     computed 0.5629     difference +0.00288   tolerance 0.01
+    ci_high   published 0.9600     computed 0.9600     difference -0.00002   tolerance 0.01
+
 Analysis: example-significance-loss
 Title:    Worked example: retraction removes statistical significance
 Outcome:  Synthetic outcome
 Measure:  RR
 Model:    random-effects
 Studies:  4 (1 retracted)
-
-Reproduction
-  matches the published 0.74 (-0.7%)
 
 Original
   RR      0.74
@@ -44,6 +46,9 @@ Impact
   Removed:            Fabricated 2015
 
 Action: human review recommended
+
+──────────────────────────────────────────────────────────
+1 analysis checked · 1 needs human review
 ```
 
 ## Why ReMeta?
@@ -86,11 +91,15 @@ This is a reproducible recalculation, not an AI opinion. You supply the
 study-level data; ReMeta runs closed-form, deterministic statistics on it.
 Anyone with the same numbers gets the same answer, by hand if they like.
 
-Step 1 is a gate, not a formality. Before comparing anything, ReMeta
-recomputes the estimate the review itself printed. If it cannot reproduce
-that number, the comparison is labelled unverified rather than reported as a
-finding — a recalculation you cannot anchor to the original is a different
+Step 1 is a gate, not a formality, and it is enforced in code. Before forming
+any verdict, ReMeta recomputes the estimate and confidence interval the
+review itself printed. If it cannot reproduce them, **no verdict is issued at
+all**: the result is `UNVERIFIED`, nothing is compared, and the command exits
+`3`. A recalculation you cannot anchor to the published result is a different
 analysis wearing the same name.
+
+That is a verification problem in the input data, not a finding about the
+review. See [The reproduction gate](#the-reproduction-gate).
 
 ## Quick start
 
@@ -140,7 +149,7 @@ PYTHONPATH=src python3 -m remeta check data/examples/example-significance-loss.j
 
 ## Your first analysis
 
-The repository ships three input files you can run immediately.
+The repository ships four input files you can run immediately.
 
 ```bash
 remeta check data/examples/example-significance-loss.json
@@ -150,13 +159,17 @@ That produces the report at the top of this page. Reading it:
 
 | Line | Meaning |
 | --- | --- |
-| `Reproduction` | Whether ReMeta reproduced the estimate the source declared. Everything below is only as trustworthy as this line. |
+| `GATE` | Whether ReMeta reproduced what the review printed. Nothing below it means anything if this line says `FAILED`. |
 | `Original` | The pooled estimate with all studies included, including the retracted one. |
 | `After removing…` | The same calculation over the surviving studies only. |
 | `Change in estimate` | Percentage move in the point estimate, on the reporting scale. |
 | `Retracted weight` | Share of the original pooled weight the retracted studies carried. |
 | `Impact` | The severity class (see below). |
 | `Action` | Whether a human needs to look at this. |
+
+Every published number the gate checked is shown against the one ReMeta
+computed, at full precision, because rounding is exactly what the gate
+adjudicates.
 
 In this example a significant risk ratio of 0.74 (p = 0.024) becomes 0.84
 (p = 0.112) once the fabricated trial is removed. The direction is unchanged
@@ -169,6 +182,9 @@ Two more:
 # The pooled effect crosses the null: the review's direction was wrong.
 remeta check data/examples/example-direction-reversal.json
 
+# The gate fires and ReMeta refuses to issue a verdict. Exits 3.
+remeta check data/examples/example-unverified.json
+
 # A real published meta-analysis with no retractions, used to validate the maths.
 remeta check data/bcg_colditz_1994.json
 ```
@@ -176,6 +192,61 @@ remeta check data/bcg_colditz_1994.json
 The example files under `data/examples/` are **synthetic**, built to
 demonstrate each severity class. `data/bcg_colditz_1994.json` is real
 published trial data.
+
+## The reproduction gate
+
+Every analysis is checked against what the review printed before anything is
+compared. The gate has four outcomes:
+
+| State | Meaning | Verdict issued |
+| --- | --- | --- |
+| `REPRODUCED` | The estimate and both interval bounds match within tolerance. | yes |
+| `PARTIAL` | Everything reported matches, but the interval was not reported, so the check is weaker. | yes, labelled |
+| `FAILED` | Something reported falls outside tolerance. | **no** |
+| `UNANCHORED` | The input declared nothing to compare against. | yes, labelled, and always ranked below anchored results |
+
+Two tolerance rules are tried, and a pass under either is a pass. The report
+records which one granted it.
+
+| Rule | Tolerance |
+| --- | --- |
+| `absolute` | 0.01 on each compared value, or 0.03 across all of them |
+| `precision` | Half a unit in the last digit each value was printed to, so 0.49 allows 0.005 |
+
+A `FAILED` gate is the one case where ReMeta refuses to answer the question
+you asked it. That is deliberate. Try it:
+
+```bash
+remeta check data/examples/example-unverified.json    # exits 3
+```
+
+```text
+GATE: FAILED — cannot reproduce the published result; no verdict is issued
+  ! estimate  published 0.3000     computed 0.7351     difference +0.43509   tolerance 0.01
+  ! ci_low    published 0.1800     computed 0.5629     difference +0.38288   tolerance 0.01
+  ! ci_high   published 0.5000     computed 0.9600     difference +0.45998   tolerance 0.01
+```
+
+When this happens, the input rows do not produce the published result. The
+usual causes are an extraction error, a different pooling method, or a
+different set of included studies. All of them are things to investigate in
+the data, and none of them is a conclusion about the review.
+
+## Simulated removal
+
+Removing studies that are **not** retracted, to ask what would happen if they
+were, is a legitimate thing to want. Presenting it as a retraction impact is
+not: a reader who sees real trials listed under "removed" will conclude those
+trials were retracted.
+
+Set `"simulated_removal": true` on the analysis and ReMeta prints a banner
+above every result, in text and in JSON. There is no flag to suppress it, and
+a test asserts there never will be.
+
+```text
+SIMULATED REMOVAL — the studies removed below are NOT retracted. This is a
+hypothetical recalculation, not a retraction impact.
+```
 
 ## Input format
 
@@ -221,7 +292,8 @@ variance, whichever the published forest plot gives you.
 | `title`, `outcome` | no | Free text, shown in the report. |
 | `source_doi`, `is_primary_outcome` | no | Provenance. |
 | `reported_estimate` | no | What the paper printed, for the reproduction gate. |
-| `reported_ci_low`, `reported_ci_high` | no | The published interval. |
+| `reported_ci_low`, `reported_ci_high` | no | The published interval. Supply both to get the strongest gate check. |
+| `simulated_removal` | no | `true` when the removed studies are not actually retracted. |
 | `metadata` | no | Any object; ReMeta stores it and does not interpret it. |
 
 **Study fields**
@@ -230,6 +302,7 @@ variance, whichever the published forest plot gives you.
 | --- | --- |
 | `id` | Unique within the analysis. |
 | `events_treat`, `total_treat`, `events_control`, `total_control` | The 2×2 table. All four or none. |
+| `events_treat`, `person_time_treat`, `events_control`, `person_time_control` | Event counts with person-time at risk, for incidence rate ratios. |
 | `yi`, `vi` | Precomputed effect and its variance. `yi` is on the **log scale** for ratio measures. Both or neither. |
 | `retracted` | `true` to exclude this study from the recalculation. Defaults to `false`. |
 | `retraction_reason`, `doi`, `year`, `notes` | Provenance. |
@@ -241,20 +314,23 @@ flag.
 
 ## Supported measures and models
 
-| Measure | From a 2×2 table | From `yi`/`vi` | Null |
+| Measure | From counts | From `yi`/`vi` | Null |
 | --- | --- | --- | --- |
-| `RR` risk ratio | yes | yes | 1 |
-| `OR` odds ratio | yes | yes | 1 |
-| `RD` risk difference | yes | yes | 0 |
+| `RR` risk ratio | 2×2 table | yes | 1 |
+| `OR` odds ratio | 2×2 table | yes | 1 |
+| `RD` risk difference | 2×2 table | yes | 0 |
+| `IRR` incidence rate ratio | events + person-time | yes | 1 |
 | `HR` hazard ratio | no | yes | 1 |
-| `IRR` incidence rate ratio | no | yes | 1 |
 | `MD` mean difference | no | yes | 0 |
 | `SMD` standardised mean difference | no | yes | 0 |
 
-Ratio measures are pooled in log space and reported exponentiated. A hazard
-ratio needs time-to-event data and an incidence rate ratio needs person-time,
-so neither can be reconstructed from counts alone — supply `yi` and `vi` for
-those, and ReMeta will say so if you do not.
+Ratio measures are pooled in log space and reported exponentiated.
+
+An incidence rate ratio is a ratio of *rates*, so it needs person-time at
+risk in each arm, not participant totals. A hazard ratio needs time-to-event
+data and cannot be reconstructed from counts at all. ReMeta refuses both
+rather than quietly computing a different quantity under the label you asked
+for, and says which field to supply instead.
 
 Two models are available, both conventional by design:
 
@@ -267,6 +343,14 @@ describe the heterogeneity in the data without being used for weighting.
 Zero cells in a 2×2 table get RevMan's default 0.5 continuity correction,
 applied to all four cells and only when a cell is actually zero.
 
+A study with **no events in either arm** is a different case: it carries no
+information about the contrast, and correcting it would hand it a real pooled
+weight it has not earned. Such studies are dropped, and every exclusion is
+listed in the report and in the JSON, because a silently dropped row is as
+misleading as a silently wrong one. Pass `include_double_zero=True` to the
+Python API to pool them under the correction instead, which is what some
+meta-analysis software does and what reproducing that software requires.
+
 ## Understanding the output
 
 Every analysis lands in exactly one severity class:
@@ -276,6 +360,7 @@ Every analysis lands in exactly one severity class:
 | `DIRECTION REVERSED` | The pooled effect crossed the null. The review's direction was wrong. | yes |
 | `CANNOT BE POOLED` | Fewer than two studies survive. The result cannot be reproduced without the retracted work. | yes |
 | `SIGNIFICANCE CHANGED` | The effect kept its direction but crossed the 0.05 boundary, in either direction. | yes |
+| `UNVERIFIED` | The reproduction gate failed. No verdict was formed. | not a finding; fix the input |
 | `SUBSTANTIAL SHIFT` | The estimate moved by at least 10% without changing the verdict. | no |
 | `MINIMAL SHIFT` | The estimate moved by less than 10%. | no |
 | `NO RETRACTIONS` | Nothing in this file is marked retracted. | no |
@@ -293,9 +378,15 @@ Exit codes make ReMeta usable in a pipeline:
 | `0` | Nothing needs human review. |
 | `1` | At least one analysis needs human review. |
 | `2` | Usage or data error. |
+| `3` | At least one analysis failed the reproduction gate, so no verdict could be issued for it. |
 
-`--json` prints the same information as machine-readable JSON, including the
-reproduction status, both pooled results, the severity class and the notes.
+`3` outranks `1`: if part of a batch could not be verified, that is the
+strongest thing ReMeta can honestly say about the batch.
+
+`--json` prints the same information as machine-readable JSON, including a
+`gate` object with a named comparison per value, both pooled results, the
+severity class, any excluded studies and the notes. An analysis that failed
+the gate carries `"actionable": false` and a null `recalculated`.
 
 ## Validation
 
@@ -315,6 +406,10 @@ software. ReMeta reproduces its published DerSimonian-Laird values:
 That is a check against independent implementations of the same estimators,
 not a test of the code against itself, and it runs on every commit. Anyone
 can verify it in R with `metafor::dat.bcg`.
+
+Every number in this README is listed in [CLAIMS.md](CLAIMS.md) with its
+source or the test that proves it, and continuous integration fails if a
+number appears here without an entry there.
 
 **The impact classification itself is not yet externally validated.** The
 thresholds are taken from published work, but ReMeta has not been run against
@@ -387,17 +482,21 @@ the `NO_COLOR` environment variable is set.
 ## Python API
 
 ```python
-from remeta import analyse, check_reproduction, fragility, load
+from remeta import Severity, analyse, fragility, load
 
 for ma in load("data/examples/example-significance-loss.json"):
-    reproduction = check_reproduction(ma)
-    if not reproduction.ok:
-        print(f"{ma.id}: reproduction {reproduction.status}; treat with caution")
-
     impact = analyse(ma)
-    print(ma.id, impact.severity.value, impact.summary())
-    # example-significance-loss significance_change
-    #   0.735 -> 0.843 (+14.7%), p 0.0238 -> 0.112
+
+    # The gate is on every result, and analyse() has already enforced it.
+    print(ma.id, impact.gate.state.value, impact.gate.describe())
+    # example-significance-loss reproduced
+    #   reproduces the published estimate and interval (absolute rule)
+
+    if impact.severity is Severity.UNVERIFIED:
+        continue                      # no verdict exists to read
+
+    print(" ", impact.severity.value, impact.summary())
+    #   significance_change 0.735 -> 0.843 (+14.7%), p 0.0238 -> 0.112
 
     if impact.severity.actionable:
         print("  needs human review")
@@ -416,9 +515,11 @@ The public surface is small and importable straight from `remeta`:
 | `effect_size` | Effect and variance for one study, on the analysis scale. |
 | `analyse` | Recalculate without retracted studies; returns an `Impact`. |
 | `Severity` | The severity classes, with `.rank` and `.actionable`. |
-| `check_reproduction` | The reproduction gate; returns a `Reproduction`. |
+| `GateState`, `Gate`, `GateComparison` | The gate result and its per-value comparisons. |
+| `check_gate` | The reproduction gate; returns a `Gate` with a `GateState`. |
 | `leave_one_out`, `fragility` | Influence analysis. |
 | `DataError` | Raised for every input problem, with a readable message. |
+| `DoubleZeroError` | A `DataError` subclass for a study with no events in either arm. |
 
 Invalid input raises `DataError` and nothing else, so a batch job can catch
 one exception type and keep going.
@@ -447,12 +548,16 @@ python -m unittest discover
 ```
 
 Add `-v` to see the test names. The suite covers the pooling engine against
-published reference values, effect-size calculation from 2×2 tables including
-zero cells, input validation and error messages, every severity class, the
-reproduction gate, leave-one-out influence, and the command line interface
-including its exit codes. Continuous integration runs it on Python 3.10
-through 3.13, then runs every command shown in this README and checks that
-the package still imports nothing outside the standard library.
+published reference values, effect-size calculation from counts including
+zero cells and double zeros, incidence rate ratios from person-time, input
+validation and error messages, every severity class, all four gate states
+including the rounding boundary, leave-one-out influence, and the command
+line interface including its exit codes.
+
+Continuous integration runs it on Python 3.10 through 3.13, then runs every
+command shown in this README and asserts its exit code, checks that every
+number in this README is accounted for in `CLAIMS.md`, and verifies the
+package still imports nothing outside the standard library.
 
 ## Contributing
 
